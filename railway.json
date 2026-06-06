@@ -1,5 +1,5 @@
 {
-  "deploy": {
-    "startCommand": "find / -name pip 2>/dev/null | head -5 && find / -name uvicorn 2>/dev/null | head -5"
+  "build": {
+    "builder": "DOCKERFILE"
   }
 }
