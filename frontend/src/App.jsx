@@ -3,7 +3,7 @@ import './index.css'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = 'https://predicting-crop-yield-using-soil-and-weather-dat-production.up.railway.app'
 
 function App() {
   const [activePage, setActivePage] = useState('dashboard')
