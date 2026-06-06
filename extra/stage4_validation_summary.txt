@@ -1,0 +1,25 @@
+CROP YIELD PREDICTION - VALIDATION SUMMARY
+======================================================================
+
+Overall Test Performance:
+  • Test Records (2018–2020): 2179
+  • Test MAE: 1.0007272593123375
+  • Test RMSE: 3.251900375138246
+  • Test R²: 0.9505630228887184
+  • Cross-Val MAE: 1.101500262644284
+
+Crop Performance (Test Set):
+  • Best Performing Crop: Coconut 
+  • Best Crop MAE: 0.0
+  • Worst Performing Crop: Sugarcane
+  • Worst Crop MAE: 5.82
+  • Problematic Crops: 13
+
+State Performance (Test Set):
+  • Best Performing State: Sikkim
+  • Worst Performing State: Andhra Pradesh
+
+Edge Cases (Test Set):
+  • High Error Cases (95th percentile): 109
+  • Percentage: 5.00%
+
