@@ -1,5 +1,5 @@
 {
   "deploy": {
-    "startCommand": "/opt/venv/bin/pip install -r requirements.txt && /opt/venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port $PORT"
+    "startCommand": "find / -name pip 2>/dev/null | head -5 && find / -name uvicorn 2>/dev/null | head -5"
   }
 }
