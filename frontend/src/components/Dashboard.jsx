@@ -6,7 +6,7 @@ import {
 import GaugeChart from './GaugeChart'
 import farmerImg from '../assets/farmer.png'
 
-const API_BASE = 'https://predicting-crop-yield-using-soil-and-weather-dat-production.up.railway.app'
+const API_BASE = 'https://agripredict-api-531174775648.europe-west1.run.app'
 
 const INPUT_TABS = [
   { id: 'location', icon: '📍', label: 'Location & Crop' },
