@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import GaugeChart from './GaugeChart'
 import farmerImg from '../assets/farmer.png'
-import { API_BASE } from '../constants'
+import { API_BASE, STATE_DEFAULTS } from '../constants'
 
 const INPUT_TABS = [
   { id: 'location', icon: '📍', label: 'Location & Crop' },
@@ -72,15 +72,63 @@ export default function Dashboard({ options, stats }) {
   // Debounce timer ref
   const debounceRef = useRef(null)
 
-  // Initialize defaults
+  // Seed the form once `options` arrives. This is prop-to-state synchronisation on a
+  // one-shot async load, not a render cascade: it runs when options changes identity,
+  // which happens once when the live payload replaces the bundled seed.
   useEffect(() => {
     if (options) {
-      if (options.states?.length) setState(options.states[0])
+      if (options.states?.length) {
+        const first = options.states[0]
+        const d = options.state_defaults?.[first] || STATE_DEFAULTS[first]
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        setState(first)
+        if (d) {
+          setN(d.N); setP(d.P); setK(d.K); setPH(d.pH)
+          setTemp(d.avg_temp_c); setRainfall(d.total_rainfall_mm)
+          setHumidity(d.avg_humidity_percent)
+        }
+      }
       if (options.crops?.length) setCrop(options.crops[0])
       if (options.seasons?.length) setSeason(options.seasons[0])
       if (options.year_max) setYear(options.year_max)
     }
   }, [options])
+
+  /**
+   * Load a state's recorded soil and climate alongside the name.
+   *
+   * The v3 model does not take `state` as a feature -- it infers region from soil and
+   * climate instead -- so selecting a state without loading its values would leave the
+   * forecast completely unchanged and the dropdown visibly dead. Prefers the live
+   * values from /api/options and falls back to the bundled copy before that lands.
+   */
+  function applyState(name) {
+    setState(name)
+    const d = options?.state_defaults?.[name] || STATE_DEFAULTS[name]
+    if (!d) return
+    setN(d.N); setP(d.P); setK(d.K); setPH(d.pH)
+    setTemp(d.avg_temp_c)
+    setRainfall(d.total_rainfall_mm)
+    setHumidity(d.avg_humidity_percent)
+    if (d.fertilizer_per_ha != null) setFertilizer(d.fertilizer_per_ha)
+    if (d.pesticide_per_ha != null) setPesticide(d.pesticide_per_ha)
+  }
+
+  // Weather varies by year as well as state, so track the year control too.
+  useEffect(() => {
+    if (!state || !year) return
+    let alive = true
+    fetch(`${API_BASE}/api/state-climate?state=${encodeURIComponent(state)}&year=${year}`)
+      .then(r => r.ok ? r.json() : null)
+      .then(d => {
+        if (!alive || !d || d.avg_temp_c == null) return
+        setTemp(d.avg_temp_c)
+        setRainfall(d.total_rainfall_mm)
+        setHumidity(d.avg_humidity_percent)
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [state, year])
 
   // Soil health preview (live)
   const soilPreview = (() => {
@@ -215,8 +263,10 @@ export default function Dashboard({ options, stats }) {
             <div className="kpi-icon amber">🎯</div>
             <div className="kpi-content">
               <div className="kpi-label">Model Accuracy</div>
-              <div className="kpi-value">95%</div>
-              <div className="kpi-sub">R² Score</div>
+              <div className="kpi-value">{stats?.model_accuracy || '—'}</div>
+              <div className="kpi-sub">
+                R² · {stats?.model_accuracy_core || '—'} on core staples
+              </div>
             </div>
           </div>
           <div className="kpi-card fade-in fade-in-delay-5">
@@ -254,7 +304,7 @@ export default function Dashboard({ options, stats }) {
                 <div className="input-row cols-2">
                   <div className="form-field">
                     <label>State</label>
-                    <select value={state} onChange={e => setState(e.target.value)}>
+                    <select value={state} onChange={e => applyState(e.target.value)}>
                       {options?.states?.map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>

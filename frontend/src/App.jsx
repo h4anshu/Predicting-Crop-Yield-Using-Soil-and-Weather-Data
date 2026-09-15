@@ -2,6 +2,11 @@ import { useState, useEffect } from 'react'
 import './index.css'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
+import Prediction from './pages/Prediction'
+import HistoricalTrends from './pages/HistoricalTrends'
+import CropInsights from './pages/CropInsights'
+import SoilClimate from './pages/SoilClimate'
+import ModelPerformance from './pages/ModelPerformance'
 import { API_BASE, DEFAULT_OPTIONS, DEFAULT_STATS } from './constants'
 
 function App() {
@@ -60,6 +65,11 @@ function App() {
         {activePage === 'dashboard' && (
           <Dashboard options={options} stats={stats} />
         )}
+        {activePage === 'prediction' && <Prediction options={options} />}
+        {activePage === 'trends' && <HistoricalTrends options={options} />}
+        {activePage === 'insights' && <CropInsights options={options} />}
+        {activePage === 'soil' && <SoilClimate options={options} />}
+        {activePage === 'model' && <ModelPerformance />}
         {activePage === 'about' && (
           <div className="main-content">
             <div className="main-content-inner">
@@ -84,42 +94,44 @@ function App() {
                   </p>
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Model Details</h3>
                   <ul style={{ paddingLeft: '1.2rem' }}>
-                    <li><strong>Algorithm:</strong> Extra Trees Regressor (200 estimators)</li>
-                    <li><strong>Test R²:</strong> 0.9506</li>
-                    <li><strong>Mean Absolute Error:</strong> 1.00</li>
-                    <li><strong>Training records:</strong> 19,689</li>
-                    <li><strong>Coverage:</strong> 55 crops · 30 states</li>
+                    <li><strong>Algorithm:</strong> Extra Trees Regressor (200 estimators, max depth 20)</li>
+                    <li><strong>Test R²:</strong> {stats?.model_accuracy || '—'} across all crops,{' '}
+                      {stats?.model_accuracy_core || '—'} on core staples</li>
+                    <li><strong>Mean Absolute Error:</strong> {stats?.model_mae ?? '—'} t/ha</li>
+                    <li><strong>Training records:</strong> {stats?.total_records?.toLocaleString('en-IN') || '—'}</li>
+                    <li><strong>Coverage:</strong> {stats?.crops_covered || '—'} crops · {stats?.states_covered || '—'} states</li>
+                    <li><strong>Validation:</strong> temporal holdout — trained on 1997–2017, tested on 2018–2020</li>
                   </ul>
+                  <p style={{ marginTop: '0.8rem' }}>
+                    Two accuracy figures are quoted because crop yields in this dataset differ by
+                    more than an order of magnitude. A model that merely separates high-magnitude
+                    crops from low-magnitude ones scores well without doing much agronomy, so the
+                    lower core-staples figure is the honest description of everyday performance.
+                    The <strong>Model Performance</strong> page sets out the full breakdown.
+                  </p>
+                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Units and exclusions</h3>
+                  <p>
+                    Yields are reported in tonnes per hectare. Coconut is excluded from the model:
+                    Indian government records count individual nuts rather than weight, so its
+                    figures are not comparable with every other crop in the same column.
+                  </p>
+                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Scope of a forecast</h3>
+                  <p>
+                    Soil is recorded once per state and weather once per state-year, so a forecast
+                    describes conditions typical of a region rather than one specific field. Use it
+                    to compare options — crops, seasons, input levels — rather than as a substitute
+                    for a soil test. Predictions are statistical estimates and should be one input
+                    among several in farm planning.
+                  </p>
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>How to Use</h3>
                   <ol style={{ paddingLeft: '1.2rem' }}>
                     <li>Enter your field's location, soil, climate, and farm inputs on the <strong>Dashboard</strong></li>
                     <li>Click <strong>Predict Yield</strong> to get the forecast</li>
                     <li>Review the four score gauges and AI recommendations</li>
+                    <li>Use <strong>Prediction</strong> to compare several input scenarios side by side</li>
                     <li>Check <strong>Historical Trends</strong> to see how yields have evolved</li>
+                    <li>Read <strong>Model Performance</strong> for accuracy, limits and validation</li>
                   </ol>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-        {activePage !== 'dashboard' && activePage !== 'about' && (
-          <div className="main-content">
-            <div className="main-content-inner">
-              <div className="page-header fade-in">
-                <div className="page-header-left">
-                  <span className="page-header-icon">🚧</span>
-                  <div>
-                    <h1 className="page-header-title">Coming Soon</h1>
-                    <div className="page-header-subtitle">
-                      This section is under development.
-                    </div>
-                  </div>
-                </div>
-              </div>
-              <div className="section-card fade-in" style={{ maxWidth: 600, textAlign: 'center', padding: '3rem' }}>
-                <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🔨</div>
-                <div style={{ color: '#4a5d4e', fontSize: '1rem' }}>
-                  Navigate to <strong>Dashboard</strong> to use the crop yield prediction tool.
                 </div>
               </div>
             </div>

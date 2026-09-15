@@ -48,7 +48,7 @@ export default function Sidebar({ activePage, onPageChange, stats }) {
         </div>
         <div className="sidebar-info-item">
           <div className="sidebar-info-label">Accuracy (R²)</div>
-          <div className="sidebar-info-value accent">95%</div>
+          <div className="sidebar-info-value accent">{stats?.model_accuracy || '—'}</div>
         </div>
         <div className="sidebar-info-item">
           <div className="sidebar-info-label">Data Records</div>
