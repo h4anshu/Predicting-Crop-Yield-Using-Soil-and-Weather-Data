@@ -3,6 +3,7 @@ FastAPI backend for AgriPredict AI
 Serves the ML model and data logic as REST endpoints.
 """
 
+import json
 import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -11,9 +12,13 @@ import joblib
 import numpy as np
 import pandas as pd
 
+from features import build_row
+
 # ── Config ──
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "crop_yield_model_v2_extra_trees.pkl")
+MODEL_PATH = os.path.join(BASE_DIR, "crop_yield_model_v3.pkl")
+LEGACY_MODEL_PATH = os.path.join(BASE_DIR, "crop_yield_model_v2_extra_trees.pkl")
+METRICS_PATH = os.path.join(BASE_DIR, "model_metrics.json")
 DATA_PATH = os.path.join(BASE_DIR, "master_dataset_enhanced.csv")
 FALLBACK_DATA_PATH = os.path.join(BASE_DIR, "master_dataset_cleaned.csv")
 
@@ -31,20 +36,62 @@ app.add_middleware(
 )
 
 # ── Load model and data ──
-model = joblib.load(MODEL_PATH)
-MODEL_FEATURES = list(model.feature_names_in_)
+# The model is loaded on first prediction rather than at import. Cloud Run scales to
+# zero, so an import-time unpickle put the full model-load cost in front of every
+# cold request -- including /api/options, which only needs the CSV.
+_model = None
+
+with open(METRICS_PATH, encoding="utf-8") as f:
+    MODEL_METRICS = json.load(f)
+
+EXCLUDED_CROPS = set(MODEL_METRICS["data_quality"]["excluded_crops"])
+
+
+def get_model():
+    global _model
+    if _model is None:
+        path = MODEL_PATH if os.path.exists(MODEL_PATH) else LEGACY_MODEL_PATH
+        _model = joblib.load(path)
+    return _model
+
+
+def model_features():
+    return list(get_model().feature_names_in_)
 
 data_path = DATA_PATH if os.path.exists(DATA_PATH) else FALLBACK_DATA_PATH
 data = pd.read_csv(data_path)
 
 state_options = sorted(data["state"].dropna().unique().tolist())
 season_options = sorted(data["season"].dropna().unique().tolist())
-crop_options = sorted(data["crop"].dropna().unique().tolist())
+crop_options = sorted(c for c in data["crop"].dropna().unique().tolist()
+                      if c.strip() not in EXCLUDED_CROPS)
 crop_yield_ranges = data.groupby("crop")["yield"].agg(["min", "max", "mean", "median"]).round(3)
 
 
 def yield_unit(crop: str) -> str:
     return SPECIAL_UNIT_CROPS.get(crop, DEFAULT_UNIT)
+
+
+def predict_with_interval(model, input_df, lo_pct=5, hi_pct=95):
+    """Point forecast plus the spread of the 200 trees that produced it.
+
+    This is a model-agreement interval, not a calibrated prediction interval: it
+    reports where the ensemble's members disagree, which understates true predictive
+    uncertainty because it cannot see error the whole forest shares. It replaces a
+    hardcoded "confidence: 94" that was not measured from anything. Labelled honestly
+    in the UI as ensemble agreement.
+    """
+    pre = model.named_steps["preprocessing"]
+    est = model.named_steps["model"]
+    Xt = pre.transform(input_df)
+    per_tree = np.stack([t.predict(Xt) for t in est.estimators_])
+    point = float(per_tree.mean(axis=0)[0])
+    lo = float(np.percentile(per_tree[:, 0], lo_pct))
+    hi = float(np.percentile(per_tree[:, 0], hi_pct))
+    # relative width of the interval; reported as-is rather than being mapped onto
+    # an invented 0-100 "confidence" score
+    spread = (hi - lo) / point if point > 0 else 0.0
+    return point, lo, hi, float(spread)
 
 
 # ── Score helpers ──
@@ -109,15 +156,56 @@ class PredictRequest(BaseModel):
 
 
 # ── Endpoints ──
+# Per-state soil and latest-year climate. v3 does not take `state` as a feature, so
+# the State control only means something if selecting one loads that state's actual
+# agronomic values -- otherwise the dropdown is inert. Shipped with /api/options so
+# the frontend can fill the form on the first paint.
+STATE_DEFAULTS = {}
+for _st, _g in data.groupby("state"):
+    _latest = _g.sort_values("year").iloc[-1]
+    STATE_DEFAULTS[_st.strip()] = {
+        "N": int(_latest["N"]), "P": int(_latest["P"]), "K": int(_latest["K"]),
+        "pH": round(float(_latest["pH"]), 2),
+        "avg_temp_c": round(float(_latest["avg_temp_c"]), 2),
+        "total_rainfall_mm": round(float(_latest["total_rainfall_mm"]), 2),
+        "avg_humidity_percent": round(float(_latest["avg_humidity_percent"]), 2),
+        "fertilizer_per_ha": round(float(_latest["fertilizer_per_ha"]), 2),
+        "pesticide_per_ha": round(float(_latest["pesticide_per_ha"]), 2),
+    }
+
+# Weather varies by state AND year, so the form can track the selected year too.
+STATE_YEAR_CLIMATE = {}
+for (_st, _yr), _g in data.groupby(["state", "year"]):
+    _r = _g.iloc[0]
+    STATE_YEAR_CLIMATE.setdefault(_st.strip(), {})[int(_yr)] = {
+        "avg_temp_c": round(float(_r["avg_temp_c"]), 2),
+        "total_rainfall_mm": round(float(_r["total_rainfall_mm"]), 2),
+        "avg_humidity_percent": round(float(_r["avg_humidity_percent"]), 2),
+    }
+
+
 @app.get("/api/options")
 def get_options():
     return {
-        "states": state_options,
-        "seasons": season_options,
-        "crops": crop_options,
+        "states": [s.strip() for s in state_options],
+        "seasons": [s.strip() for s in season_options],
+        "crops": [c.strip() for c in crop_options],
         "year_min": int(data["year"].min()),
         "year_max": int(data["year"].max()),
+        "state_defaults": STATE_DEFAULTS,
     }
+
+
+@app.get("/api/state-climate")
+def get_state_climate(state: str, year: int):
+    """Observed climate for one state-year, so the form tracks both controls."""
+    st = STATE_YEAR_CLIMATE.get(state.strip(), {})
+    if year in st:
+        return {"found": True, **st[year]}
+    if st:  # fall back to the nearest year we have
+        nearest = min(st, key=lambda y: abs(y - year))
+        return {"found": False, "nearest_year": nearest, **st[nearest]}
+    return {"found": False}
 
 
 @app.get("/api/stats")
@@ -126,7 +214,9 @@ def get_stats():
         "total_records": len(data),
         "crops_covered": len(crop_options),
         "states_covered": len(state_options),
-        "model_accuracy": "95%",
+        "model_accuracy": "%d%%" % round(100 * MODEL_METRICS["headline"]["r2"]),
+        "model_accuracy_core": "%d%%" % round(100 * MODEL_METRICS["core_staples"]["r2"]),
+        "model_mae": MODEL_METRICS["headline"]["mae"],
         "year_min": int(data["year"].min()),
         "year_max": int(data["year"].max()),
         "years_covered": f"{int(data['year'].min())} - {int(data['year'].max())}",
@@ -146,49 +236,22 @@ def predict(req: PredictRequest):
     season = req.season
     crop = req.crop
 
-    # Derived features (same as original app.py)
-    NPK_total = N + P + K
-    N_to_P_ratio = N / (P + 0.1)
-    N_to_K_ratio = N / (K + 0.1)
-    P_to_K_ratio = P / (K + 0.1)
-    NPK_balance_score_val = abs((N / 3) - P) + abs((N / 1.5) - K)
-    temp_rainfall_interaction = avg_temp_c * total_rainfall_mm
-    temp_humidity_interaction = avg_temp_c * avg_humidity_percent
-    moisture_index = (total_rainfall_mm * avg_humidity_percent) / 100
-    growing_degree_days = max(0, avg_temp_c - 10)
-    pH_optimal = 1 if 6.0 <= pH <= 7.5 else 0
-    soil_fertility_score_val = (NPK_total / 200) * 0.7 + pH_optimal * 0.3
-    fertilizer_rainfall_ratio = fertilizer_per_ha / (total_rainfall_mm + 1)
-    pesticide_efficiency_val = pesticide_per_ha / 10
-    input_intensity_val = (fertilizer_per_ha / 500 + pesticide_per_ha / 20) / 2
-    years_since_start = year - int(data["year"].min())
-
-    input_data = {
+    payload = {
         "N": N, "P": P, "K": K, "pH": pH,
         "avg_temp_c": avg_temp_c, "avg_humidity_percent": avg_humidity_percent,
         "total_rainfall_mm": total_rainfall_mm,
-        "pesticide_per_ha": pesticide_per_ha, "fertilizer_per_ha": fertilizer_per_ha,
-        "year": year, "state": state, "season": season, "crop": crop,
-        "NPK_total": NPK_total, "N_to_P_ratio": N_to_P_ratio,
-        "N_to_K_ratio": N_to_K_ratio, "P_to_K_ratio": P_to_K_ratio,
-        "NPK_balance_score": NPK_balance_score_val,
-        "temp_rainfall_interaction": temp_rainfall_interaction,
-        "temp_humidity_interaction": temp_humidity_interaction,
-        "moisture_index": moisture_index,
-        "growing_degree_days": growing_degree_days,
-        "pH_optimal": pH_optimal,
-        "soil_fertility_score": soil_fertility_score_val,
-        "fertilizer_rainfall_ratio": fertilizer_rainfall_ratio,
-        "pesticide_efficiency": pesticide_efficiency_val,
-        "input_intensity": input_intensity_val,
-        "years_since_start": years_since_start,
+        "fertilizer_per_ha": fertilizer_per_ha, "pesticide_per_ha": pesticide_per_ha,
+        "year": year, "season": season, "crop": crop,
     }
+    model = get_model()
+    feats = model_features()
+    input_df = build_row(payload, feats)
+    N_to_P_ratio = input_df["N_to_P_ratio"].iloc[0] if "N_to_P_ratio" in input_df else N / (P + 0.1)
 
-    input_df = pd.DataFrame([input_data]).reindex(columns=MODEL_FEATURES, fill_value=0)
     try:
-        prediction = float(model.predict(input_df)[0])
+        prediction, lo, hi, spread = predict_with_interval(model, input_df)
     except Exception:
-        prediction = 0.0
+        prediction, lo, hi, spread = 0.0, 0.0, 0.0, 0.0
 
     unit = yield_unit(crop)
     avg_y = float(crop_yield_ranges.loc[crop, "mean"]) if crop in crop_yield_ranges.index else 0
@@ -271,7 +334,14 @@ def predict(req: PredictRequest):
         "badge": badge,
         "avg_yield": round(avg_y, 2),
         "diff_pct": round(diff_pct, 1),
-        "confidence": 94,
+        "interval": {
+            "low": round(lo, 2),
+            "high": round(hi, 2),
+            "level": "90% ensemble agreement",
+            "note": "Range across the 200 trees. Reflects model agreement, not total "
+                    "forecast uncertainty.",
+        },
+        "spread_pct": round(100 * spread, 1),
         "scores": {
             "soil_health": {"value": soil_s, "rating": rating_label(soil_s),
                             "desc": f"Soil condition is {rating_label(soil_s).lower()} for {crop.strip()}"},
@@ -283,6 +353,64 @@ def predict(req: PredictRequest):
                             "desc": f"NPK levels are well balanced for this crop" if npk_s >= 80 else f"NPK levels are {rating_label(npk_s).lower()}"},
         },
         "recommendations": recs,
+    }
+
+
+@app.get("/api/model-metrics")
+def get_model_metrics():
+    """Everything the Model Performance page renders: holdout scores, the honest
+    core-staples breakdown, per-crop and per-state error, feature importance,
+    input sensitivity vs v2, and the documented data-quality limits."""
+    return MODEL_METRICS
+
+
+@app.get("/api/research")
+def get_research():
+    """Published evaluation artifacts from the study behind the model:
+    a baseline sweep, a feature ablation, and paired significance tests."""
+    out = {}
+    for key, fname in [
+        ("baselines", "baseline_comparison.csv"),
+        ("ablation", "ablation_study_results.csv"),
+        ("model_comparison", "stage3_model_comparison_results.csv"),
+    ]:
+        path = os.path.join(BASE_DIR, "extra", fname)
+        if os.path.exists(path):
+            out[key] = pd.read_csv(path).round(4).to_dict(orient="records")
+    return out
+
+
+@app.get("/api/soil-climate")
+def get_soil_climate():
+    """State soil profiles and the weather series behind them.
+
+    Deliberately exposes the granularity caveat: these are single values per state
+    (soil) and per state-year (weather), which is exactly why the model learns a
+    regional rather than a field-level response.
+    """
+    soil = (data.groupby("state")[["N", "P", "K", "pH"]].first().round(2)
+            .reset_index().to_dict(orient="records"))
+    w = (data.groupby(["state", "year"])[
+            ["avg_temp_c", "total_rainfall_mm", "avg_humidity_percent"]]
+         .first().round(2).reset_index())
+    weather = {}
+    for st, g in w.groupby("state"):
+        weather[st] = {
+            "years": g["year"].tolist(),
+            "temp": g["avg_temp_c"].tolist(),
+            "rainfall": g["total_rainfall_mm"].tolist(),
+            "humidity": g["avg_humidity_percent"].tolist(),
+        }
+    return {
+        "soil": soil,
+        "weather": weather,
+        "granularity": {
+            "soil": "one profile per state, constant across all 24 years",
+            "weather": "one observation per state-year",
+            "implication": "Every crop sharing a state-year has an identical soil and "
+                           "climate vector, so the model resolves regional conditions, "
+                           "not individual fields.",
+        },
     }
 
 
