@@ -2,24 +2,23 @@ import { useState, useEffect } from 'react'
 import './index.css'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
-
-const API_BASE = 'https://agripredict-api-531174775648.europe-west1.run.app'
+import { API_BASE, DEFAULT_OPTIONS, DEFAULT_STATS } from './constants'
 
 function App() {
   const [activePage, setActivePage] = useState('dashboard')
-  const [options, setOptions] = useState(null)
-  const [stats, setStats] = useState(null)
+  const [options, setOptions] = useState(DEFAULT_OPTIONS)
+  const [stats, setStats] = useState(DEFAULT_STATS)
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
     fetch(`${API_BASE}/api/options`)
       .then(r => r.json())
-      .then(d => setOptions(d))
+      .then(d => { if (d?.states?.length) setOptions(d) })
       .catch(e => console.error('Failed to load options:', e))
 
     fetch(`${API_BASE}/api/stats`)
       .then(r => r.json())
-      .then(d => setStats(d))
+      .then(d => { if (d?.total_records) setStats(d) })
       .catch(e => console.error('Failed to load stats:', e))
   }, [])
 
