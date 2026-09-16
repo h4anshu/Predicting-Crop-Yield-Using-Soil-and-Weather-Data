@@ -58,7 +58,6 @@ OUT_METRICS = os.path.join(BASE_DIR, "model_metrics.json")
 EXCLUDED_CROPS = ["Coconut"]     # unit inconsistency, see module docstring
 SCALE_OUTLIERS = ["Sugarcane"]   # legitimate but high-magnitude; reported separately
 TEST_FROM_YEAR = 2018
-CLIP_VALUE = 104.2734
 
 NUM = [
     'year', 'avg_temp_c', 'total_rainfall_mm', 'avg_humidity_percent', 'N', 'P', 'K', 'pH',
@@ -161,8 +160,14 @@ def main():
     d['season'] = d['season'].str.strip()
     n_raw = len(d)
 
-    clipped = int((d['yield'] >= CLIP_VALUE).sum())
-    clipped_by_crop = d[d['yield'] >= CLIP_VALUE]['crop'].value_counts().to_dict()
+    # Detect the winsorisation cap from the data rather than hardcoding it. A rounded
+    # literal (104.2734) is numerically ABOVE the true cap (104.2733866960), so a
+    # `>= literal` test silently matches zero rows and the artifact disappears from
+    # the report. Count what actually sits on the plateau instead.
+    clip_value = float(d['yield'].max())
+    at_cap = d['yield'] >= clip_value - 1e-6
+    clipped = int(at_cap.sum())
+    clipped_by_crop = d[at_cap]['crop'].value_counts().to_dict()
 
     df = d[~d['crop'].isin(EXCLUDED_CROPS)].copy()
     tr = df[df.year < TEST_FROM_YEAR].dropna(subset=FEATURES + ['yield'])
@@ -252,10 +257,10 @@ def main():
             "rows_used": int(len(df)),
             "excluded_crops": EXCLUDED_CROPS,
             "exclusion_reason": "Coconut is recorded in nuts/ha within a tonnes/ha column; "
-                                "winsorisation at 104.2734 collapsed 164 of its 172 rows to a "
+                                "winsorisation at the dataset cap collapsed most of its rows to a "
                                 "single value, which v2 memorised for a fake MAE of 0.000.",
             "clipped_rows": clipped,
-            "clip_value": CLIP_VALUE,
+            "clip_value": round(clip_value, 4),
             "clipped_by_crop": {k: int(v) for k, v in clipped_by_crop.items()},
             "known_ceiling": "Soil (N/P/K/pH) is a single constant per state and weather is "
                              "state-year level, so every crop sharing a state-year has an "

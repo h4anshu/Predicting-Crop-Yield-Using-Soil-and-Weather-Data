@@ -5543,10 +5543,18 @@
     "excluded_crops": [
       "Coconut"
     ],
-    "exclusion_reason": "Coconut is recorded in nuts/ha within a tonnes/ha column; winsorisation at 104.2734 collapsed 164 of its 172 rows to a single value, which v2 memorised for a fake MAE of 0.000.",
-    "clipped_rows": 0,
+    "exclusion_reason": "Coconut is recorded in nuts/ha within a tonnes/ha column; winsorisation at the dataset cap collapsed most of its rows to a single value, which v2 memorised for a fake MAE of 0.000.",
+    "clipped_rows": 197,
     "clip_value": 104.2734,
-    "clipped_by_crop": {},
+    "clipped_by_crop": {
+      "Coconut": 164,
+      "Sugarcane": 23,
+      "Onion": 3,
+      "Potato": 3,
+      "Banana": 2,
+      "Maize": 1,
+      "Cashewnut": 1
+    },
     "known_ceiling": "Soil (N/P/K/pH) is a single constant per state and weather is state-year level, so every crop sharing a state-year has an identical input vector. The model can therefore learn regional response, not field-level response. Closing this needs district-level soil/weather data, not a different algorithm."
   }
 }
