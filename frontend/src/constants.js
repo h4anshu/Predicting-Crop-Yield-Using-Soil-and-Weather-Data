@@ -4,13 +4,15 @@
 // retrain that changes the crop list stays correct without touching this file.
 // Regenerate with:  node check-constants.mjs   (it fails when these drift)
 //
-// Labels are stripped here. The source CSV pads them ('Rabi       ') but the v3 model
-// is trained on the stripped forms, and an unstripped label one-hot encodes to all
-// zeros -- silently dropping the category rather than raising.
+// Labels are stripped here. The source CSV pads them ('Rabi       ') but the model
+// is trained on the stripped forms, and the API rejects any label it does not know.
 // Coconut is absent on purpose: it is recorded in nuts/ha inside a tonnes/ha column,
-// so v3 excludes it. See model_metrics.json -> data_quality.
+// so the model excludes it. See model_metrics.json -> data_quality.
 
-export const API_BASE = 'https://agripredict-api-531174775648.europe-west1.run.app'
+// Point the app at a local API with VITE_API_BASE=http://localhost:8000 (frontend/.env.local).
+// `import.meta.env` is undefined under plain node, which check-constants.mjs also uses.
+export const API_BASE = import.meta.env?.VITE_API_BASE
+  ?? 'https://agripredict-api-531174775648.europe-west1.run.app'
 
 export const DEFAULT_OPTIONS = {
   states: [
@@ -45,24 +47,25 @@ export const DEFAULT_OPTIONS = {
   ],
   year_min: 1997,
   year_max: 2020,
+  forecast_year_max: 2021,
 }
 
 export const DEFAULT_STATS = {
   total_records: 19689,
   crops_covered: 54,
   states_covered: 30,
-  model_accuracy: '92%',
-  model_accuracy_core: '81%',
-  model_mae: 1.0014,
+  model_mae: 0.6767,
+  baseline_mae: 0.6173,
+  baseline_name: "Last season's recorded yield, repeated",
+  skill_vs_baseline_pct: -9.6,
   year_min: 1997,
   year_max: 2020,
   years_covered: '1997 - 2020',
 }
 
-// Per-state soil and climate. v3 does not take `state` as a feature, so selecting a
-// state has to load its real agronomic values or the control does nothing at all.
-// The API ships the authoritative copy in /api/options.state_defaults; this is the
-// first-paint fallback.
+// Per-state soil and climate: selecting a state loads that state's recorded values into
+// the form. The API ships the authoritative copy in /api/options.state_defaults; this is
+// the first-paint fallback.
 export const STATE_DEFAULTS = {
   "Andhra Pradesh": {
     "N": 78,

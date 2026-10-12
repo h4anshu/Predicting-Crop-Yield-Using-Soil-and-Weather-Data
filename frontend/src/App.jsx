@@ -3,6 +3,8 @@ import './index.css'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
 import Prediction from './pages/Prediction'
+import DistrictForecast from './pages/DistrictForecast'
+import DistrictMap from './pages/DistrictMap'
 import HistoricalTrends from './pages/HistoricalTrends'
 import CropInsights from './pages/CropInsights'
 import SoilClimate from './pages/SoilClimate'
@@ -14,6 +16,7 @@ function App() {
   const [options, setOptions] = useState(DEFAULT_OPTIONS)
   const [stats, setStats] = useState(DEFAULT_STATS)
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [districtPick, setDistrictPick] = useState(null)   // set by the map, read by the District Forecast page
 
   useEffect(() => {
     fetch(`${API_BASE}/api/options`)
@@ -65,6 +68,10 @@ function App() {
         {activePage === 'dashboard' && (
           <Dashboard options={options} stats={stats} />
         )}
+        {activePage === 'district' && <DistrictForecast key={districtPick ? JSON.stringify(districtPick) : 'free'} initial={districtPick} />}
+        {activePage === 'map' && (
+          <DistrictMap onOpen={pick => { setDistrictPick(pick); setActivePage('district') }} />
+        )}
         {activePage === 'prediction' && <Prediction options={options} />}
         {activePage === 'trends' && <HistoricalTrends options={options} />}
         {activePage === 'insights' && <CropInsights options={options} />}
@@ -95,19 +102,23 @@ function App() {
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Model Details</h3>
                   <ul style={{ paddingLeft: '1.2rem' }}>
                     <li><strong>Algorithm:</strong> Extra Trees Regressor (200 estimators, max depth 20)</li>
-                    <li><strong>Test R²:</strong> {stats?.model_accuracy || '—'} across all crops,{' '}
-                      {stats?.model_accuracy_core || '—'} on core staples</li>
-                    <li><strong>Mean Absolute Error:</strong> {stats?.model_mae ?? '—'} t/ha</li>
+                    <li><strong>Mean Absolute Error:</strong> {stats?.model_mae ?? '—'} t/ha, against{' '}
+                      {stats?.baseline_mae ?? '—'} t/ha for the strongest naive baseline
+                      ({stats?.baseline_name?.toLowerCase() || '—'})</li>
+                    <li><strong>Skill vs that baseline:</strong>{' '}
+                      {stats?.skill_vs_baseline_pct == null ? '—'
+                        : `${stats.skill_vs_baseline_pct > 0 ? '+' : ''}${stats.skill_vs_baseline_pct}%`}</li>
                     <li><strong>Training records:</strong> {stats?.total_records?.toLocaleString('en-IN') || '—'}</li>
                     <li><strong>Coverage:</strong> {stats?.crops_covered || '—'} crops · {stats?.states_covered || '—'} states</li>
-                    <li><strong>Validation:</strong> temporal holdout — trained on 1997–2017, tested on 2018–2020</li>
+                    <li><strong>Validation:</strong> temporal holdout — trained on 1997–2017, tested on 2018–2020, one season ahead</li>
                   </ul>
                   <p style={{ marginTop: '0.8rem' }}>
-                    Two accuracy figures are quoted because crop yields in this dataset differ by
-                    more than an order of magnitude. A model that merely separates high-magnitude
-                    crops from low-magnitude ones scores well without doing much agronomy, so the
-                    lower core-staples figure is the honest description of everyday performance.
-                    The <strong>Model Performance</strong> page sets out the full breakdown.
+                    Every forecast is anchored on the same state, crop and season's recorded yield in
+                    earlier years, so it needs at least one recorded season in the three years
+                    before. Accuracy is quoted as a skill score against simple baselines, such as
+                    repeating last season's yield, because a high R² alone does not show a model adds
+                    anything. A negative skill means the baseline is currently better. The{' '}
+                    <strong>Model Performance</strong> page sets out the full comparison.
                   </p>
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Units and exclusions</h3>
                   <p>
@@ -127,7 +138,7 @@ function App() {
                   <ol style={{ paddingLeft: '1.2rem' }}>
                     <li>Enter your field's location, soil, climate, and farm inputs on the <strong>Dashboard</strong></li>
                     <li>Click <strong>Predict Yield</strong> to get the forecast</li>
-                    <li>Review the four score gauges and AI recommendations</li>
+                    <li>Compare the forecast with last season's recorded yield, shown beside it</li>
                     <li>Use <strong>Prediction</strong> to compare several input scenarios side by side</li>
                     <li>Check <strong>Historical Trends</strong> to see how yields have evolved</li>
                     <li>Read <strong>Model Performance</strong> for accuracy, limits and validation</li>

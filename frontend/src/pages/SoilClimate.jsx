@@ -132,9 +132,9 @@ export default function SoilClimate({ options }) {
             <>
               <div className="nutrient-list">
                 <Nutrient label="Nitrogen (N)" value={soil.N} max={160} unit="kg/ha"
-                          hint="Drives vegetative growth. The strongest nutrient signal in this model." />
+                          hint="Drives vegetative growth." />
                 <Nutrient label="Phosphorus (P)" value={soil.P} max={90} unit="kg/ha"
-                          hint="Root development and grain fill. The single most responsive input in v3." />
+                          hint="Root development and grain fill." />
                 <Nutrient label="Potassium (K)" value={soil.K} max={60} unit="kg/ha"
                           hint="Water regulation and stress tolerance." />
               </div>

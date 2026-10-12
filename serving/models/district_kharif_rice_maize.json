@@ -1,0 +1,33 @@
+{
+  "label": "Kharif Rice + Maize",
+  "trained_through": 2024,
+  "history_lag_seasons": 1,
+  "rows": 21416,
+  "districts": 667,
+  "vol_threshold": 0.3518195545851795,
+  "q_flagged": 0.48026350762973,
+  "q_unflagged": 0.26295288670267336,
+  "calibration_rows": 3446,
+  "skill": {
+    "dev_2018_2023": {
+      "n": 7003,
+      "mae": 0.4871,
+      "last_published_mae": 0.5479,
+      "mean3_mae": 0.4982,
+      "skill_vs_last_published_pct": 11.1,
+      "skill_vs_mean3_pct": 2.2
+    },
+    "confirm_2024": {
+      "n": 1067,
+      "mae": 0.4838,
+      "last_published_mae": 0.5434,
+      "mean3_mae": 0.4947,
+      "skill_vs_last_published_pct": 11.0,
+      "skill_vs_mean3_pct": 2.2
+    }
+  },
+  "trees": {
+    "min_samples_leaf": 20,
+    "n_estimators": 100
+  }
+}

@@ -4,16 +4,16 @@ import {
   ResponsiveContainer, Cell, ErrorBar,
 } from 'recharts'
 import { ErrorState, Loading, Note, PageHeader, Page } from './shared'
-import { CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt } from './api'
-import { API_BASE, STATE_DEFAULTS } from '../constants'
+import { CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt, postPredict, cropsFor, seasonsFor, reconcile } from './api'
+import { STATE_DEFAULTS } from '../constants'
 
 /**
  * Scenario workspace: run several input sets side by side.
  *
- * The Dashboard answers "what will this field yield". This answers "which of these
- * options is better", which is the question that actually drives a planting decision.
- * It is also the page where v3's input responsiveness is visible -- with v2, changing
- * pH between scenarios would have produced near-identical bars.
+ * Each forecast is anchored on its series' last recorded yield, so scenarios that differ
+ * only in soil or weather inputs come out nearly identical -- the page says so rather than
+ * implying a lever that is not there. Scenarios that differ in state, crop, season or year
+ * do separate cleanly, because those change the series being forecast.
  */
 
 const FIELDS = [
@@ -46,18 +46,12 @@ export default function Prediction({ options }) {
 
   const run = useCallback(async () => {
     try {
-      const out = await Promise.all(scenarios.map(s =>
-        fetch(`${API_BASE}/api/predict`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(s),
-        }).then(r => {
-          if (!r.ok) throw new Error(`${r.status} ${r.statusText}`)
-          return r.json()
-        })
+      const out = await Promise.all(scenarios.map((s, i) =>
+        postPredict(s).catch(e => { throw new Error(`${SCENARIO_NAMES[i]}: ${e.message}`) })
       ))
       setResults(out)
     } catch (e) {
+      setResults([])   // a stale comparison would describe inputs the form no longer holds
       setError(e.message)
     }
     setBusy(false)
@@ -80,12 +74,17 @@ export default function Prediction({ options }) {
     setScenarios(s => s.map((sc, j) => (j === i ? { ...sc, [key]: value } : sc)))
   }
 
-  /** Selecting a state loads its real soil and climate: v3 has no `state` feature, so
-   *  without this the control would change nothing at all. */
+  /** Selecting a state loads its recorded soil and climate, and keeps crop/season to a
+   *  combination that has records. */
   function setState_(i, stateName) {
-    const d = STATE_DEFAULTS[stateName]
+    const d = options?.state_defaults?.[stateName] || STATE_DEFAULTS[stateName]
     setScenarios(s => s.map((sc, j) =>
-      j === i ? { ...sc, state: stateName, ...(d || {}) } : sc))
+      j === i ? { ...sc, state: stateName, ...(d || {}), ...reconcile(options, stateName, sc.crop, sc.season) } : sc))
+  }
+
+  function setCrop_(i, crop) {
+    setScenarios(s => s.map((sc, j) =>
+      j === i ? { ...sc, ...reconcile(options, sc.state, crop, sc.season) } : sc))
   }
 
   function addScenario() {
@@ -225,9 +224,8 @@ export default function Prediction({ options }) {
                 ))}
               </div>
               <Note tone="info">
-                These notes come from agronomic threshold rules (rainfall bands, pH ranges, N:P
-                ratios), not from the model. They explain the conditions; the forecast above is the
-                model's output.
+                {results[active].heuristics?.note} Each note names the band it tests; the forecast
+                above is the model's output.
               </Note>
             </div>
           )}
@@ -267,21 +265,21 @@ export default function Prediction({ options }) {
               </div>
               <div className="form-field">
                 <label>Crop</label>
-                <select value={sc.crop} onChange={e => update(i, 'crop', e.target.value)}>
-                  {options?.crops?.map(c => <option key={c} value={c}>{c}</option>)}
+                <select value={sc.crop} onChange={e => setCrop_(i, e.target.value)}>
+                  {cropsFor(options, sc.state).map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
               <div className="form-field">
                 <label>Season</label>
                 <select value={sc.season} onChange={e => update(i, 'season', e.target.value)}>
-                  {options?.seasons?.map(s => <option key={s} value={s}>{s}</option>)}
+                  {seasonsFor(options, sc.state, sc.crop).map(s => <option key={s} value={s}>{s}</option>)}
                 </select>
               </div>
               <div className="form-field">
                 <label>Year</label>
                 <select value={sc.year} onChange={e => update(i, 'year', Number(e.target.value))}>
                   {options && Array.from(
-                    { length: (options.year_max + 5) - options.year_min + 1 },
+                    { length: (options.forecast_year_max ?? options.year_max + 1) - options.year_min + 1 },
                     (_, k) => options.year_min + k
                   ).map(y => <option key={y} value={y}>{y}</option>)}
                 </select>
@@ -304,10 +302,13 @@ export default function Prediction({ options }) {
           ))}
         </div>
 
-        <Note tone="info" title="Selecting a state loads its soil and climate">
-          The model does not take state as a feature — it infers region from soil and climate
-          instead. Picking a state therefore fills in that state's recorded values, which you can
-          then adjust to describe a field that differs from its regional baseline.
+        <Note tone="warn" title="Soil and weather inputs barely move the forecast">
+          Each forecast starts from the last recorded yield of the same state, crop and season and
+          learns a correction from there. Soil is a single constant per state in this dataset, so
+          scenarios that differ only in N, P, K, pH or weather come out nearly identical — that is
+          the model's honest response, not a fault. Scenarios that change the state, crop, season or
+          year do separate, because they change the series being forecast. The{' '}
+          <strong>Model Performance</strong> page measures each input's effect.
         </Note>
       </div>
     </Page>

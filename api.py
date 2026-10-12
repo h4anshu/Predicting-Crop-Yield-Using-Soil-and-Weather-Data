@@ -4,35 +4,47 @@ Serves the ML model and data logic as REST endpoints.
 """
 
 import json
+import logging
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.middleware.gzip import GZipMiddleware
+from pydantic import BaseModel, Field, field_validator
 import joblib
 import numpy as np
 import pandas as pd
 
+from district_forecast import DistrictForecaster, ForecastError
 from features import build_row
+from forecasting import LAGS, build_panel
+
+logger = logging.getLogger("agripredict")
 
 # ── Config ──
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "crop_yield_model_v3.pkl")
-LEGACY_MODEL_PATH = os.path.join(BASE_DIR, "crop_yield_model_v2_extra_trees.pkl")
 METRICS_PATH = os.path.join(BASE_DIR, "model_metrics.json")
 DATA_PATH = os.path.join(BASE_DIR, "master_dataset_enhanced.csv")
 FALLBACK_DATA_PATH = os.path.join(BASE_DIR, "master_dataset_cleaned.csv")
 
-SPECIAL_UNIT_CROPS = {"Coconut": "nuts/ha", "Coconut ": "nuts/ha"}
+SPECIAL_UNIT_CROPS = {"Coconut": "nuts/ha"}
 DEFAULT_UNIT = "tonnes/ha"
+
+# Browsers allowed to call this API. Set CORS_ORIGINS (comma-separated) on the deployed
+# service to the frontend's origin, e.g. https://agripredict.vercel.app. The default
+# is local development only, so a deploy that forgets the variable fails closed.
+CORS_ORIGINS = [o.strip() for o in
+                os.environ.get("CORS_ORIGINS", "http://localhost:5173,http://localhost:4173").split(",")
+                if o.strip()]
 
 app = FastAPI(title="AgriPredict AI API")
 
+app.add_middleware(GZipMiddleware, minimum_size=1000)   # the outlines and the all-district forecast are ~0.4 MB / 0.1 MB of JSON
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # ── Load model and data ──
@@ -48,10 +60,11 @@ EXCLUDED_CROPS = set(MODEL_METRICS["data_quality"]["excluded_crops"])
 
 
 def get_model():
+    # No fallback to an older artifact: v2 has no history features, so serving it would
+    # return forecasts the current contract cannot describe. A missing model fails loudly.
     global _model
     if _model is None:
-        path = MODEL_PATH if os.path.exists(MODEL_PATH) else LEGACY_MODEL_PATH
-        _model = joblib.load(path)
+        _model = joblib.load(MODEL_PATH)
     return _model
 
 
@@ -60,12 +73,29 @@ def model_features():
 
 data_path = DATA_PATH if os.path.exists(DATA_PATH) else FALLBACK_DATA_PATH
 data = pd.read_csv(data_path)
+# The source CSV pads its labels ('Rabi       '). Strip once at load so every lookup below,
+# the request validation and the model all see the same spelling.
+for _col in ("state", "crop", "season"):
+    data[_col] = data[_col].str.strip()
 
 state_options = sorted(data["state"].dropna().unique().tolist())
 season_options = sorted(data["season"].dropna().unique().tolist())
 crop_options = sorted(c for c in data["crop"].dropna().unique().tolist()
-                      if c.strip() not in EXCLUDED_CROPS)
-crop_yield_ranges = data.groupby("crop")["yield"].agg(["min", "max", "mean", "median"]).round(3)
+                      if c not in EXCLUDED_CROPS)
+
+# The yield history every forecast is anchored on. Coconut is excluded from the model, so
+# it is excluded here too.
+PANEL = build_panel(data[~data["crop"].isin(EXCLUDED_CROPS)]).sort_index()
+KNOWN_SERIES = set(PANEL.index.droplevel("year"))
+# state -> crop -> seasons that actually have records. A forecast needs a series to anchor
+# on, so the frontend offers only these combinations rather than letting users pick ones
+# that can only return a 422.
+SERIES_CHOICES = {}
+for _st, _cr, _se in sorted(KNOWN_SERIES):
+    SERIES_CHOICES.setdefault(_st, {}).setdefault(_cr, []).append(_se)
+YEAR_MIN = int(data["year"].min())
+YEAR_MAX = int(data["year"].max())
+FORECAST_YEAR_MAX = YEAR_MAX + 1   # one season past the data; beyond that no lag exists
 
 
 def yield_unit(crop: str) -> str:
@@ -81,10 +111,7 @@ def predict_with_interval(model, input_df, lo_pct=5, hi_pct=95):
     hardcoded "confidence: 94" that was not measured from anything. Labelled honestly
     in the UI as ensemble agreement.
     """
-    pre = model.named_steps["preprocessing"]
-    est = model.named_steps["model"]
-    Xt = pre.transform(input_df)
-    per_tree = np.stack([t.predict(Xt) for t in est.estimators_])
+    per_tree = model.predict_members(input_df)
     point = float(per_tree.mean(axis=0)[0])
     lo = float(np.percentile(per_tree[:, 0], lo_pct))
     hi = float(np.percentile(per_tree[:, 0], hi_pct))
@@ -138,21 +165,36 @@ def rating_label(score):
 
 
 # ── Pydantic models ──
+# Labels must be ones the model was trained on: an unknown label one-hot encodes to all
+# zeros without raising, so the category would be silently dropped from the forecast.
+# Numeric bounds are the ranges the frontend controls expose and the dataset spans
+# (rainfall peaks at 5,244 mm); anything outside them is a client error, not an input.
+LABELS = {"state": set(state_options), "crop": set(crop_options), "season": set(season_options)}
+
+
 class PredictRequest(BaseModel):
     state: str
-    year: int
+    year: int = Field(ge=YEAR_MIN, le=FORECAST_YEAR_MAX)
     crop: str
     season: str
-    N: float
-    P: float
-    K: float
-    pH: float
-    avg_temp_c: float
-    total_rainfall_mm: float
-    avg_humidity_percent: float
-    fertilizer_per_ha: float
-    pesticide_per_ha: float
-    area: float = 2.5
+    N: float = Field(ge=0, le=200)
+    P: float = Field(ge=0, le=120)
+    K: float = Field(ge=0, le=100)
+    pH: float = Field(ge=3.5, le=10)
+    avg_temp_c: float = Field(ge=5, le=45)
+    total_rainfall_mm: float = Field(ge=0, le=6000)
+    avg_humidity_percent: float = Field(ge=0, le=100)
+    fertilizer_per_ha: float = Field(ge=0, le=1000)
+    pesticide_per_ha: float = Field(ge=0, le=20)
+    area: float = Field(default=2.5, ge=0, le=100000)
+
+    @field_validator("state", "crop", "season")
+    @classmethod
+    def known_label(cls, v, info):
+        v = v.strip()
+        if v not in LABELS[info.field_name]:
+            raise ValueError(f"unknown {info.field_name} {v!r}; valid values are listed at /api/options")
+        return v
 
 
 # ── Endpoints ──
@@ -187,11 +229,13 @@ for (_st, _yr), _g in data.groupby(["state", "year"]):
 @app.get("/api/options")
 def get_options():
     return {
-        "states": [s.strip() for s in state_options],
-        "seasons": [s.strip() for s in season_options],
-        "crops": [c.strip() for c in crop_options],
-        "year_min": int(data["year"].min()),
-        "year_max": int(data["year"].max()),
+        "states": state_options,
+        "seasons": season_options,
+        "crops": crop_options,
+        "year_min": YEAR_MIN,
+        "year_max": YEAR_MAX,
+        "forecast_year_max": FORECAST_YEAR_MAX,
+        "series": SERIES_CHOICES,
         "state_defaults": STATE_DEFAULTS,
     }
 
@@ -210,93 +254,109 @@ def get_state_climate(state: str, year: int):
 
 @app.get("/api/stats")
 def get_stats():
+    skill = MODEL_METRICS["skill"]
     return {
         "total_records": len(data),
         "crops_covered": len(crop_options),
         "states_covered": len(state_options),
-        "model_accuracy": "%d%%" % round(100 * MODEL_METRICS["headline"]["r2"]),
-        "model_accuracy_core": "%d%%" % round(100 * MODEL_METRICS["core_staples"]["r2"]),
         "model_mae": MODEL_METRICS["headline"]["mae"],
-        "year_min": int(data["year"].min()),
-        "year_max": int(data["year"].max()),
-        "years_covered": f"{int(data['year'].min())} - {int(data['year'].max())}",
+        "baseline_mae": MODEL_METRICS["baselines"][skill["best_baseline"]]["mae"],
+        "baseline_name": MODEL_METRICS["baselines"][skill["best_baseline"]]["label"],
+        "skill_vs_baseline_pct": skill["vs_best_baseline_pct"],
+        "year_min": YEAR_MIN,
+        "year_max": YEAR_MAX,
+        "years_covered": f"{YEAR_MIN} - {YEAR_MAX}",
     }
+
+
+HEURISTICS_NOTE = ("Rule-of-thumb indicators with fixed thresholds that apply to every crop alike. "
+                   "They are not produced by the model and do not change the forecast.")
+
+
+def history_error(req):
+    """Why a request has nothing to anchor on, in the user's terms."""
+    if (req.state, req.crop, req.season) not in KNOWN_SERIES:
+        return (f"No records of {req.crop} in {req.state} during {req.season}, "
+                "so there is nothing to forecast from.")
+    return (f"No {req.crop} yield is recorded for {req.state} ({req.season}) in the "
+            f"{len(LAGS)} seasons before {req.year}. A forecast needs at least one.")
 
 
 @app.post("/api/predict")
 def predict(req: PredictRequest):
     N, P, K, pH = req.N, req.P, req.K, req.pH
-    avg_temp_c = req.avg_temp_c
-    total_rainfall_mm = req.total_rainfall_mm
-    avg_humidity_percent = req.avg_humidity_percent
-    fertilizer_per_ha = req.fertilizer_per_ha
-    pesticide_per_ha = req.pesticide_per_ha
-    year = req.year
-    state = req.state
-    season = req.season
     crop = req.crop
-
-    payload = {
-        "N": N, "P": P, "K": K, "pH": pH,
-        "avg_temp_c": avg_temp_c, "avg_humidity_percent": avg_humidity_percent,
-        "total_rainfall_mm": total_rainfall_mm,
-        "fertilizer_per_ha": fertilizer_per_ha, "pesticide_per_ha": pesticide_per_ha,
-        "year": year, "season": season, "crop": crop,
-    }
-    model = get_model()
-    feats = model_features()
-    input_df = build_row(payload, feats)
-    N_to_P_ratio = input_df["N_to_P_ratio"].iloc[0] if "N_to_P_ratio" in input_df else N / (P + 0.1)
+    payload = req.model_dump(exclude={"area"})
 
     try:
-        prediction, lo, hi, spread = predict_with_interval(model, input_df)
+        input_df = build_row(payload, model_features(), PANEL)
+        has_history = input_df["history_seasons"].iloc[0] > 0
+        forecast = predict_with_interval(get_model(), input_df) if has_history else None
     except Exception:
-        prediction, lo, hi, spread = 0.0, 0.0, 0.0, 0.0
+        # Never answer a failed forecast with a number: a silent 0.0 here once looked
+        # like a real (terrible) prediction. A server fault is a 500.
+        logger.exception("prediction failed for %s", payload)
+        raise HTTPException(status_code=500, detail="The forecast could not be computed.")
+    if forecast is None:
+        raise HTTPException(status_code=422, detail=history_error(req))
+    prediction, lo, hi, spread = forecast
+
+    row = input_df.iloc[0]
+    last_lag = next(k for k in LAGS if not np.isnan(row[f"yield_lag{k}"]))
+    baseline = {
+        "label": ("Last season's recorded yield" if last_lag == 1
+                  else "Mean of the recent seasons on record"),
+        "value": round(float(row["yield_anchor"]), 2),
+        "last_recorded_year": req.year - last_lag,
+        "seasons_used": int(row["history_seasons"]),
+    }
 
     unit = yield_unit(crop)
-    avg_y = float(crop_yield_ranges.loc[crop, "mean"]) if crop in crop_yield_ranges.index else 0
-    diff_pct = ((prediction - avg_y) / avg_y * 100) if avg_y > 0 else 0
+    # Compared with this series' own record before the forecast year. The crop's all-India
+    # average mixes states and seasons whose yields differ several-fold, so it called a
+    # series that is always high "HIGH PRODUCTIVITY" however the forecast moved.
+    history = PANEL.loc[(req.state, crop, req.season)]
+    avg_y = float(history[history.index < req.year].mean())
+    diff_pct = (prediction - avg_y) / avg_y * 100 if avg_y > 0 else 0
 
-    # Productivity badge
-    if avg_y > 0:
-        ratio = prediction / avg_y
-        if ratio >= 1.1:
-            badge = "HIGH PRODUCTIVITY"
-        elif ratio >= 0.85:
-            badge = "NORMAL PRODUCTIVITY"
-        else:
-            badge = "LOW PRODUCTIVITY"
+    # Productivity badge, relative to the series' own average
+    ratio = prediction / avg_y if avg_y > 0 else 1
+    if ratio >= 1.1:
+        badge = "HIGH PRODUCTIVITY"
+    elif ratio >= 0.85:
+        badge = "NORMAL PRODUCTIVITY"
     else:
-        badge = "ESTIMATE"
+        badge = "LOW PRODUCTIVITY"
 
     # Scores
     soil_s = soil_health_score(N, P, K, pH)
-    climate_s = climate_suitability_score(avg_temp_c, total_rainfall_mm, avg_humidity_percent)
-    input_s = input_efficiency_score(fertilizer_per_ha, pesticide_per_ha, total_rainfall_mm)
+    climate_s = climate_suitability_score(req.avg_temp_c, req.total_rainfall_mm, req.avg_humidity_percent)
+    input_s = input_efficiency_score(req.fertilizer_per_ha, req.pesticide_per_ha, req.total_rainfall_mm)
     npk_s = npk_balance_score(N, P, K)
 
-    # Recommendations
+    # Rule-of-thumb notes. Each states the band it tests; none quantifies an outcome the
+    # model cannot support (an earlier "yield may increase by 8-12%" had no source).
     recs = []
-    if 500 <= total_rainfall_mm <= 2500:
-        recs.append({"type": "ok", "title": "Favorable Rainfall",
-                     "desc": f"Rainfall is within the optimal range for {crop.strip()}."})
-    elif total_rainfall_mm < 500:
+    if 500 <= req.total_rainfall_mm <= 2500:
+        recs.append({"type": "ok", "title": "Rainfall in range",
+                     "desc": f"{req.total_rainfall_mm:,.0f} mm is inside the 500-2,500 mm band used here."})
+    elif req.total_rainfall_mm < 500:
         recs.append({"type": "warn", "title": "Low Rainfall",
-                     "desc": "Rainfall is below optimal. Consider irrigation planning."})
+                     "desc": "Rainfall is below 500 mm. Consider irrigation planning."})
     else:
         recs.append({"type": "warn", "title": "High Rainfall",
-                     "desc": "Very high rainfall — watch for waterlogging and disease risk."})
+                     "desc": "Rainfall is above 2,500 mm. Watch for waterlogging and disease risk."})
 
-    if 20 <= avg_temp_c <= 32:
-        recs.append({"type": "ok", "title": "Optimal Temperature",
-                     "desc": "Temperature conditions are ideal for maximum yield."})
+    if 20 <= req.avg_temp_c <= 32:
+        recs.append({"type": "ok", "title": "Temperature in range",
+                     "desc": f"{req.avg_temp_c:.1f} °C is inside the 20-32 °C band used here."})
     else:
-        recs.append({"type": "warn", "title": "Suboptimal Temperature",
-                     "desc": "Temperature is outside ideal range — monitor crop stress."})
+        recs.append({"type": "warn", "title": "Temperature outside range",
+                     "desc": f"{req.avg_temp_c:.1f} °C is outside the 20-32 °C band used here. Monitor crop stress."})
 
     if 6.0 <= pH <= 7.5:
-        recs.append({"type": "ok", "title": "Soil pH Optimal",
-                     "desc": "Soil pH is in the optimal range for this crop."})
+        recs.append({"type": "ok", "title": "Soil pH in range",
+                     "desc": f"pH {pH:.1f} is inside the 6.0-7.5 band used here."})
     elif pH < 6.0:
         recs.append({"type": "warn", "title": "Acidic Soil",
                      "desc": f"pH {pH:.1f} is acidic. Consider liming."})
@@ -304,29 +364,22 @@ def predict(req: PredictRequest):
         recs.append({"type": "warn", "title": "Alkaline Soil",
                      "desc": f"pH {pH:.1f} is alkaline. Consider sulfur application."})
 
-    if N_to_P_ratio > 4:
-        recs.append({"type": "warn", "title": "Increase Phosphorus",
-                     "desc": "Increase phosphorus by ~10% for better yield outcome."})
-    elif N_to_P_ratio < 1.5:
-        recs.append({"type": "warn", "title": "Increase Nitrogen",
-                     "desc": "Nitrogen is low relative to phosphorus. Boost N inputs."})
+    n_to_p = N / (P + 0.1)
+    if n_to_p > 4:
+        recs.append({"type": "warn", "title": "High N:P ratio",
+                     "desc": f"N:P is {n_to_p:.1f}. A soil test would show whether phosphorus is limiting."})
+    elif n_to_p < 1.5:
+        recs.append({"type": "warn", "title": "Low N:P ratio",
+                     "desc": f"N:P is {n_to_p:.1f}. Nitrogen may be limiting."})
     else:
-        recs.append({"type": "ok", "title": "Balanced NPK",
-                     "desc": "Your N:P ratio is well balanced for most crops."})
+        recs.append({"type": "ok", "title": "N:P in range",
+                     "desc": f"N:P is {n_to_p:.1f}, inside the 1.5-4 band used here."})
 
-    if avg_y > 0:
-        if prediction >= avg_y * 1.1:
-            recs.append({"type": "info", "title": "Yield Potential",
-                         "desc": "With optimized inputs, yield may increase by 8-12%."})
-        elif prediction < avg_y * 0.85:
-            recs.append({"type": "info", "title": "Optimization Tip",
-                         "desc": "Review soil and inputs — historical yields suggest higher potential."})
-        else:
-            recs.append({"type": "info", "title": "Yield Potential",
-                         "desc": "Your inputs align with historically average yields."})
-    else:
-        recs.append({"type": "info", "title": "Yield Potential",
-                     "desc": "Predictions for this crop are based on limited historical data."})
+    if baseline["value"] > 0:
+        change = (prediction / baseline["value"] - 1) * 100
+        recs.append({"type": "info", "title": "Versus the series' own history",
+                     "desc": f"The forecast is {change:+.0f}% against {baseline['value']:.2f} {unit} "
+                             f"recorded in {baseline['last_recorded_year']}."})
 
     return {
         "prediction": round(prediction, 2),
@@ -334,6 +387,7 @@ def predict(req: PredictRequest):
         "badge": badge,
         "avg_yield": round(avg_y, 2),
         "diff_pct": round(diff_pct, 1),
+        "baseline": baseline,
         "interval": {
             "low": round(lo, 2),
             "high": round(hi, 2),
@@ -342,15 +396,16 @@ def predict(req: PredictRequest):
                     "forecast uncertainty.",
         },
         "spread_pct": round(100 * spread, 1),
+        "heuristics": {"note": HEURISTICS_NOTE},
         "scores": {
             "soil_health": {"value": soil_s, "rating": rating_label(soil_s),
-                            "desc": f"Soil condition is {rating_label(soil_s).lower()} for {crop.strip()}"},
+                            "desc": f"Soil condition is {rating_label(soil_s).lower()}"},
             "climate_suitability": {"value": climate_s, "rating": rating_label(climate_s),
-                                    "desc": f"Climate is highly suitable for this crop" if climate_s >= 80 else f"Climate is {rating_label(climate_s).lower()} for this crop"},
+                                    "desc": f"Climate is {rating_label(climate_s).lower()}"},
             "input_efficiency": {"value": input_s, "rating": rating_label(input_s),
-                                 "desc": f"Inputs are {rating_label(input_s).lower()} optimized" if input_s >= 65 else f"Inputs are {rating_label(input_s).lower()}"},
+                                 "desc": f"Inputs are {rating_label(input_s).lower()}"},
             "npk_balance": {"value": npk_s, "rating": rating_label(npk_s),
-                            "desc": f"NPK levels are well balanced for this crop" if npk_s >= 80 else f"NPK levels are {rating_label(npk_s).lower()}"},
+                            "desc": f"NPK levels are {rating_label(npk_s).lower()}"},
         },
         "recommendations": recs,
     }
@@ -362,6 +417,60 @@ def get_model_metrics():
     core-staples breakdown, per-crop and per-state error, feature importance,
     input sensitivity vs v2, and the documented data-quality limits."""
     return MODEL_METRICS
+
+
+# ── District forecasts (Phase 4, first slice) ──
+# History-only, publication-lag aware; see district_forecast.py for what is and is not served and why.
+_district = None
+
+
+def get_district():
+    global _district
+    if _district is None:
+        _district = DistrictForecaster()
+    return _district
+
+
+def _district_call(fn, *args):
+    try:
+        return fn(*args)
+    except ForecastError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except FileNotFoundError:
+        logger.exception("district forecast files missing")
+        raise HTTPException(status_code=503, detail="District forecasts are not available on this server.")
+    except Exception:
+        logger.exception("district forecast failed for %s", args)
+        raise HTTPException(status_code=500, detail="The forecast could not be computed.")
+
+
+@app.get("/api/district/options")
+def district_options():
+    """state -> district -> the crop/season series that can be forecast."""
+    return _district_call(lambda: get_district().options())
+
+
+@app.get("/api/district/forecast")
+def district_forecast(district_code: int, crop: str, season: str, year: int):
+    return _district_call(lambda: get_district().forecast(district_code, crop, season, year))
+
+
+@app.get("/api/district/map")
+def district_map(crop: str, season: str, year: int):
+    """Every forecastable district for one crop, season and year."""
+    return _district_call(lambda: get_district().map_data(crop, season, year))
+
+
+@app.get("/api/district/shapes")
+def district_shapes():
+    """Simplified district outlines (drawn by the map page; not for measuring areas)."""
+    return _district_call(lambda: get_district().shapes())
+
+
+@app.get("/api/district/track-record")
+def district_track_record(district_code: int, crop: str, season: str):
+    """Past forecasts of this series, each made by a model trained on earlier years only, beside what was recorded."""
+    return _district_call(lambda: get_district().track_record(district_code, crop, season))
 
 
 @app.get("/api/research")

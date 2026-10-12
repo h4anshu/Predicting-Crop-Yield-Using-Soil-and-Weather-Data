@@ -6,6 +6,7 @@ import {
 import GaugeChart from './GaugeChart'
 import farmerImg from '../assets/farmer.png'
 import { API_BASE, STATE_DEFAULTS } from '../constants'
+import { postPredict, cropsFor, seasonsFor, reconcile } from '../pages/api'
 
 const INPUT_TABS = [
   { id: 'location', icon: '📍', label: 'Location & Crop' },
@@ -65,6 +66,7 @@ export default function Dashboard({ options, stats }) {
   const [pesticide, setPesticide] = useState(1.25)
 
   const [result, setResult] = useState(null)
+  const [error, setError] = useState(null)
   const [historical, setHistorical] = useState(null)
   const [loading, setLoading] = useState(false)
   const [needsUpdate, setNeedsUpdate] = useState(false)
@@ -87,23 +89,25 @@ export default function Dashboard({ options, stats }) {
           setTemp(d.avg_temp_c); setRainfall(d.total_rainfall_mm)
           setHumidity(d.avg_humidity_percent)
         }
+        const start = reconcile(options, first, '', '')
+        setCrop(start.crop)
+        setSeason(start.season)
       }
-      if (options.crops?.length) setCrop(options.crops[0])
-      if (options.seasons?.length) setSeason(options.seasons[0])
       if (options.year_max) setYear(options.year_max)
     }
   }, [options])
 
   /**
-   * Load a state's recorded soil and climate alongside the name.
-   *
-   * The v3 model does not take `state` as a feature -- it infers region from soil and
-   * climate instead -- so selecting a state without loading its values would leave the
-   * forecast completely unchanged and the dropdown visibly dead. Prefers the live
-   * values from /api/options and falls back to the bundled copy before that lands.
+   * Switching state loads that state's recorded soil and climate into the form, and keeps
+   * crop/season to a combination that has records (a forecast needs a series to anchor
+   * on). Prefers the live values from /api/options and falls back to the bundled copy
+   * before that lands.
    */
   function applyState(name) {
     setState(name)
+    const next = reconcile(options, name, crop, season)
+    setCrop(next.crop)
+    setSeason(next.season)
     const d = options?.state_defaults?.[name] || STATE_DEFAULTS[name]
     if (!d) return
     setN(d.N); setP(d.P); setK(d.K); setPH(d.pH)
@@ -145,35 +149,36 @@ export default function Dashboard({ options, stats }) {
   })()
 
   // Predict function
+  // Waits for the live options: the bundled seed has no state/crop/season map, so until
+  // they arrive the form may hold a combination with no records.
+  const ready = Boolean(options?.series)
+
   const doPredict = useCallback(async () => {
-    if (!crop || !state || !season) return
+    if (!crop || !state || !season || !ready) return
     setLoading(true)
     setNeedsUpdate(false)
     try {
-      const res = await fetch(`${API_BASE}/api/predict`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          state, year, crop, season, N, P, K, pH,
-          avg_temp_c: temp,
-          total_rainfall_mm: rainfall,
-          avg_humidity_percent: humidity,
-          fertilizer_per_ha: fertilizer,
-          pesticide_per_ha: pesticide,
-          area,
-        }),
-      })
-      const data = await res.json()
-      setResult(data)
+      setResult(await postPredict({
+        state, year, crop, season, N, P, K, pH,
+        avg_temp_c: temp,
+        total_rainfall_mm: rainfall,
+        avg_humidity_percent: humidity,
+        fertilizer_per_ha: fertilizer,
+        pesticide_per_ha: pesticide,
+        area,
+      }))
+      setError(null)
     } catch (e) {
-      console.error('Prediction failed:', e)
+      // Drop the previous number: it describes different inputs than the form now holds.
+      setResult(null)
+      setError(e.message)
     }
     setLoading(false)
-  }, [state, year, crop, season, N, P, K, pH, temp, rainfall, humidity, fertilizer, pesticide, area])
+  }, [ready, state, year, crop, season, N, P, K, pH, temp, rainfall, humidity, fertilizer, pesticide, area])
 
   // Auto-predict with debounce when ANY input changes
   useEffect(() => {
-    if (!crop || !state || !season) return
+    if (!crop || !state || !season || !ready) return
 
     // Show "needs update" hint immediately
     if (result) setNeedsUpdate(true)
@@ -187,7 +192,7 @@ export default function Dashboard({ options, stats }) {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
     }
-  }, [state, year, crop, season, N, P, K, pH, temp, rainfall, humidity, fertilizer, pesticide, area])
+  }, [ready, state, year, crop, season, N, P, K, pH, temp, rainfall, humidity, fertilizer, pesticide, area])
 
   // Fetch historical data when crop/state changes
   useEffect(() => {
@@ -262,10 +267,13 @@ export default function Dashboard({ options, stats }) {
           <div className="kpi-card fade-in fade-in-delay-4">
             <div className="kpi-icon amber">🎯</div>
             <div className="kpi-content">
-              <div className="kpi-label">Model Accuracy</div>
-              <div className="kpi-value">{stats?.model_accuracy || '—'}</div>
+              <div className="kpi-label">Skill vs Last Season</div>
+              <div className="kpi-value">
+                {stats?.skill_vs_baseline_pct == null ? '—'
+                  : `${stats.skill_vs_baseline_pct > 0 ? '+' : ''}${stats.skill_vs_baseline_pct}%`}
+              </div>
               <div className="kpi-sub">
-                R² · {stats?.model_accuracy_core || '—'} on core staples
+                MAE {stats?.model_mae ?? '—'} vs {stats?.baseline_mae ?? '—'} t/ha
               </div>
             </div>
           </div>
@@ -312,7 +320,7 @@ export default function Dashboard({ options, stats }) {
                     <label>Year</label>
                     <select value={year} onChange={e => setYear(Number(e.target.value))}>
                       {options && Array.from(
-                        { length: (options.year_max + 5) - options.year_min + 1 },
+                        { length: (options.forecast_year_max ?? options.year_max + 1) - options.year_min + 1 },
                         (_, i) => options.year_min + i
                       ).map(y => <option key={y} value={y}>{y}</option>)}
                     </select>
@@ -321,14 +329,18 @@ export default function Dashboard({ options, stats }) {
                 <div className="input-row cols-3">
                   <div className="form-field">
                     <label>Crop</label>
-                    <select value={crop} onChange={e => setCrop(e.target.value)}>
-                      {options?.crops?.map(c => <option key={c} value={c}>{c}</option>)}
+                    <select value={crop} onChange={e => {
+                      const next = reconcile(options, state, e.target.value, season)
+                      setCrop(next.crop)
+                      setSeason(next.season)
+                    }}>
+                      {cropsFor(options, state).map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </div>
                   <div className="form-field">
                     <label>Season</label>
                     <select value={season} onChange={e => setSeason(e.target.value)}>
-                      {options?.seasons?.map(s => <option key={s} value={s}>{s}</option>)}
+                      {seasonsFor(options, state, crop).map(s => <option key={s} value={s}>{s}</option>)}
                     </select>
                   </div>
                   <div className="form-field">
@@ -451,12 +463,22 @@ export default function Dashboard({ options, stats }) {
                       {result.diff_pct >= 0 ? 'Above' : 'Below'} Average ({result.avg_yield} {result.unit})
                     </div>
                   </div>
-                  <div className="confidence-row">
-                    <span>Model Confidence ⓘ</span>
-                    <span className="confidence-value">{result.confidence}%</span>
+                  <div className="compare-box">
+                    <div className="compare-label">
+                      {result.baseline.label} ({result.baseline.last_recorded_year})
+                    </div>
+                    <div className="compare-value">{result.baseline.value} {result.unit}</div>
+                    <div className="compare-sub">
+                      Forecast range {result.interval.low}–{result.interval.high} · {result.interval.level}
+                    </div>
                   </div>
-                  <div className="confidence-bar">
-                    <div className="confidence-bar-fill" style={{ width: `${result.confidence}%` }} />
+                </div>
+              ) : error ? (
+                <div className="empty-state">
+                  <div className="empty-state-icon">⚠️</div>
+                  <div className="empty-state-text">
+                    No forecast for these inputs
+                    <div style={{ fontSize: '0.85rem', marginTop: '0.5rem', color: 'var(--text-light)' }}>{error}</div>
                   </div>
                 </div>
               ) : (
@@ -544,7 +566,12 @@ export default function Dashboard({ options, stats }) {
           )}
         </div>
 
-        {/* ── SCORE GAUGES ── */}
+        {/* ── RULE-OF-THUMB INDICATORS (not model output) ── */}
+        <div className="section-title" style={{ marginBottom: '0.3rem' }}>🧮 Rule-of-thumb indicators</div>
+        <p className="section-lede">
+          {result?.heuristics?.note
+            || 'Fixed thresholds that apply to every crop alike. Not produced by the model; they do not change the forecast.'}
+        </p>
         <div className="gauges-row">
           {result?.scores ? (
             Object.entries(result.scores).map(([key, s]) => (
@@ -573,7 +600,7 @@ export default function Dashboard({ options, stats }) {
 
         {/* ── RECOMMENDATIONS ── */}
         <div className="recs-card fade-in">
-          <div className="section-title">💡 AI Insights & Recommendations</div>
+          <div className="section-title">💡 Agronomic notes</div>
           <div className="recs-grid">
             {result?.recommendations?.map((rec, i) => (
               <div className="rec-item" key={i}>

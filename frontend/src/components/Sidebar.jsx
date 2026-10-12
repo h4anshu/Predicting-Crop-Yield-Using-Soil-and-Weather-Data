@@ -1,5 +1,7 @@
 const NAV_ITEMS = [
   { id: 'dashboard', icon: '🏠', label: 'Dashboard' },
+  { id: 'district', icon: '🗺️', label: 'District Forecast' },
+  { id: 'map', icon: '🧭', label: 'District Map' },
   { id: 'prediction', icon: '🔮', label: 'Prediction' },
   { id: 'trends', icon: '📊', label: 'Historical Trends' },
   { id: 'insights', icon: '🌾', label: 'Crop Insights' },
@@ -47,8 +49,11 @@ export default function Sidebar({ activePage, onPageChange, stats }) {
           <div className="sidebar-info-value">Extra Trees Regressor</div>
         </div>
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Accuracy (R²)</div>
-          <div className="sidebar-info-value accent">{stats?.model_accuracy || '—'}</div>
+          <div className="sidebar-info-label">Skill vs last season</div>
+          <div className="sidebar-info-value accent">
+            {stats?.skill_vs_baseline_pct == null ? '—'
+              : `${stats.skill_vs_baseline_pct > 0 ? '+' : ''}${stats.skill_vs_baseline_pct}%`}
+          </div>
         </div>
         <div className="sidebar-info-item">
           <div className="sidebar-info-label">Data Records</div>

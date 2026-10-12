@@ -1,0 +1,8 @@
+pyarrow==23.0.0
+imdlib==0.3.1
+xarray==2026.9.0
+shapely==2.2.0
+requests==2.32.5
+scipy==1.17.0
+pypdf==6.20.0
+earthengine-api==1.7.47

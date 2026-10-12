@@ -7,10 +7,13 @@ import { Bar, ErrorState, KpiCard, Loading, Note, PageHeader, Page, Spec } from 
 import { useApi, CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt } from './api'
 
 /**
- * The evaluation report. Deliberately leads with the weaker, more defensible number
- * rather than the flattering one: a reader who finds the Coconut artifact themselves
- * stops trusting everything else on the page.
+ * The evaluation report. It leads with skill against naive baselines -- whether the model
+ * beats repeating what already happened -- because R² on its own cannot show that. A
+ * reader who finds a flattering number without its baseline stops trusting the rest.
  */
+const signed = n => `${n > 0 ? '+' : ''}${fmt(n, 1)}%`
+const skillColor = n => (n > 0 ? 'var(--green-600)' : 'var(--red)')
+
 export default function ModelPerformance() {
   const { data: m, error, loading } = useApi('/api/model-metrics')
   const { data: research } = useApi('/api/research')
@@ -23,6 +26,22 @@ export default function ModelPerformance() {
   const dq = m.data_quality
   const sens = m.sensitivity || {}
   const sensV2 = m.sensitivity_v2 || {}
+
+  const sk = m.skill
+  const best = m.baselines[sk.best_baseline]
+  const beats = sk.vs_best_baseline_pct > 0
+  const lso = m.leave_states_out
+  const inputAblation = m.ablation || []
+  const historyOnly = inputAblation.find(a => a.variant.startsWith('History only'))
+  const shipped = inputAblation.find(a => a.variant.includes('shipped'))
+  const weatherGain = historyOnly && shipped ? historyOnly.mae - shipped.mae : null
+  const thinYears = (m.rolling_origin || []).filter(r => r.n < 100)
+
+  // every predictor on the same rows, best first
+  const comparisonRows = [
+    ...Object.entries(m.baselines).map(([key, b]) => ({ key, name: b.label, mae: b.mae, r2: b.r2, skill: sk.vs_baseline_pct[key] })),
+    { key: 'model', name: `This model (${m.version})`, mae: m.headline.mae, r2: m.headline.r2, skill: null, isModel: true },
+  ].sort((a, b) => a.mae - b.mae)
 
   const sensRows = Object.keys(sens).map(k => ({
     key: k,
@@ -44,34 +63,182 @@ export default function ModelPerformance() {
       <PageHeader
         icon="📈"
         title="Model Performance"
-        subtitle={`${m.model} · ${m.version} · evaluated on a ${m.evaluated_on.includes('2018') ? '2018–2020' : ''} temporal holdout`}
+        subtitle={`${m.model} · ${m.version} · ${m.evaluated_on}`}
       />
 
-      {/* ─── Headline numbers, both of them ─────────────────────────── */}
+      {/* ─── Headline: skill against the strongest naive baseline ───── */}
       <div className="kpi-row fade-in">
         <KpiCard
-          icon="🎯" iconBg="var(--green-100)"
-          label="R² — ALL CROPS" value={fmt(m.headline.r2, 4)}
-          sub={`MAE ${fmt(m.headline.mae)} t/ha · n=${m.headline.n}`}
+          icon="🎯" iconBg={beats ? 'var(--green-100)' : 'var(--amber-bg)'}
+          label="SKILL VS NAIVE BASELINE" value={signed(sk.vs_best_baseline_pct)}
+          sub={`MAE ${fmt(m.headline.mae, 3)} vs ${fmt(best.mae, 3)} t/ha`}
+          title="1 − model MAE ÷ baseline MAE, against the strongest baseline. Positive means the model beats simply repeating history; negative means repeating history is better."
+        />
+        <KpiCard
+          icon="🗺️" iconBg="var(--purple-bg)"
+          label="SKILL ON UNSEEN STATES" value={signed(lso.skill.vs_best_baseline_pct)}
+          sub={`MAE ${fmt(lso.model.mae, 3)} · whole states held out`}
+          title="Whole states are withheld from training, so this is how the model does in a region it has never seen."
+        />
+        <KpiCard
+          icon="📏" iconBg="var(--blue-bg)"
+          label="MEAN ABSOLUTE ERROR" value={`${fmt(m.core_staples.mae, 3)}`}
+          sub={`t/ha on core staples · ${fmt(m.headline.mae, 3)} on all crops`}
         />
         <KpiCard
           icon="🌾" iconBg="var(--amber-bg)"
           label="R² — CORE STAPLES" value={fmt(m.core_staples.r2, 4)}
-          sub={`excl. ${m.core_staples.excludes.join(', ')} · n=${m.core_staples.n}`}
-          title="The conservative number. Sugarcane's large magnitude inflates the headline R²."
-        />
-        <KpiCard
-          icon="📏" iconBg="var(--blue-bg)"
-          label="MEAN ABSOLUTE ERROR" value={`${fmt(m.core_staples.mae)}`}
-          sub="t/ha on core staples"
-        />
-        <KpiCard
-          icon="🔁" iconBg="var(--purple-bg)"
-          label={`${m.cv.folds}-FOLD CV MAE`} value={fmt(m.cv.mae_mean, 3)}
-          sub={`± ${fmt(m.cv.mae_std, 3)} across folds`}
-          title="Low spread across folds indicates the score is not an artifact of one lucky split."
+          sub={`last-season baseline ${fmt(m.core_staples_baselines.persistence.r2, 4)} · n=${m.core_staples.n}`}
+          title="Quoted beside the baseline's R²: on its own R² cannot show the model adds anything."
         />
       </div>
+
+      {/* ─── The verdict, against baselines ─────────────────────────── */}
+      <div className="section-card fade-in">
+        <div className="section-title">⚖️ Does the model beat simply repeating history?</div>
+        <p className="section-lede">
+          Every predictor below is scored on the same {m.headline.n.toLocaleString('en-IN')} held-out
+          forecasts. A baseline needs no model: it is an average, or last season's recorded yield
+          carried forward. Skill is how much the model's error is lower than the baseline's.
+        </p>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Predictor</th><th className="num">MAE (t/ha)</th><th className="num">R²</th>
+                <th className="num">Model skill vs it</th><th style={{ width: '26%' }} />
+              </tr>
+            </thead>
+            <tbody>
+              {comparisonRows.map(r => (
+                <tr key={r.key} className={r.isModel ? 'row-highlight' : ''}>
+                  <td><strong>{r.name}</strong></td>
+                  <td className="num"><strong>{fmt(r.mae, 3)}</strong></td>
+                  <td className="num muted">{fmt(r.r2, 4)}</td>
+                  <td className="num" style={r.skill == null ? undefined : { color: skillColor(r.skill) }}>
+                    {r.skill == null ? '—' : signed(r.skill)}
+                  </td>
+                  <td>
+                    <Bar value={r.mae} max={Math.max(...comparisonRows.map(x => x.mae))}
+                         color={r.isModel ? CHART_COLORS.green : '#cddbd2'} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <Note tone={beats ? 'info' : 'warn'}
+              title={beats ? 'The model beats every baseline'
+                : `The model does not yet beat "${best.label.toLowerCase()}"`}>
+          The model's error is {fmt(m.headline.mae, 3)} t/ha against {fmt(best.mae, 3)} t/ha for the
+          strongest baseline, a skill of <strong>{signed(sk.vs_best_baseline_pct)}</strong>. Against
+          the state × crop × season average the skill is {signed(sk.vs_baseline_pct.series_mean)}, so
+          the history features are doing the work.{' '}
+          {weatherGain !== null && (
+            <>Adding weather and soil on top of history {weatherGain > 0 ? 'lowers' : 'raises'} MAE
+            by {fmt(Math.abs(weatherGain), 3)} t/ha (table below). </>
+          )}
+          Soil here is one constant per state and weather one value per state-year, so more inputs
+          of this kind are unlikely to close the gap; finer-grained data is the lever.
+        </Note>
+      </div>
+
+      {/* ─── Is the verdict stable? ─────────────────────────────────── */}
+      <div className="section-card fade-in">
+        <div className="section-title">🔁 Is that verdict stable?</div>
+        <p className="section-lede">
+          The headline is one split. Two harder checks: forecast one test year at a time, each
+          trained only on the years before it, and hold out whole states.
+        </p>
+        <div className="table-scroll">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Test year</th><th className="num">n</th><th className="num">Model MAE</th>
+                <th className="num">Last season</th><th className="num">3-yr mean</th>
+                <th className="num">Skill vs last season</th>
+              </tr>
+            </thead>
+            <tbody>
+              {m.rolling_origin.map(r => (
+                <tr key={r.year} className={r.n < 100 ? 'muted' : ''}>
+                  <td><strong>{r.year}</strong></td>
+                  <td className="num muted">{r.n}</td>
+                  <td className="num"><strong>{fmt(r.model_mae, 3)}</strong></td>
+                  <td className="num">{fmt(r.persistence_mae, 3)}</td>
+                  <td className="num">{fmt(r.mean_3yr_mae, 3)}</td>
+                  <td className="num" style={{ color: skillColor(r.skill_vs_persistence_pct) }}>
+                    {signed(r.skill_vs_persistence_pct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        {thinYears.length > 0 && (
+          <Note tone="info" title="Years with few records are noise">
+            The dataset holds only {thinYears.map(r => `${r.n} records for ${r.year}`).join(' and ')}, so{' '}
+            {thinYears.length > 1 ? 'those rows say' : 'that row says'} little. Judge the verdict by the
+            years with a full set of records.
+          </Note>
+        )}
+
+        <div className="table-scroll" style={{ marginTop: '1.2rem' }}>
+          <table className="data-table">
+            <thead>
+              <tr><th>Unseen states ({lso.folds}-fold, whole states held out)</th>
+                  <th className="num">MAE (t/ha)</th><th className="num">R²</th></tr>
+            </thead>
+            <tbody>
+              <tr className="row-highlight">
+                <td><strong>This model, with the state's own history</strong></td>
+                <td className="num"><strong>{fmt(lso.model.mae, 3)}</strong></td>
+                <td className="num muted">{fmt(lso.model.r2, 4)}</td>
+              </tr>
+              {Object.entries(lso.baselines).map(([k, b]) => (
+                <tr key={k}>
+                  <td>{b.label}</td>
+                  <td className="num">{fmt(b.mae, 3)}</td>
+                  <td className="num muted">{fmt(b.r2, 4)}</td>
+                </tr>
+              ))}
+              <tr>
+                <td>This model with <em>no</em> history (a region with no records)</td>
+                <td className="num">{fmt(lso.no_history.mae, 3)}</td>
+                <td className="num muted">{fmt(lso.no_history.r2, 4)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <Note tone="info" title="What an unseen region gets from agronomic inputs alone">
+          With no yield history, soil, weather and farm inputs beat a crop average by only{' '}
+          <strong>{fmt(lso.no_history.vs_crop_mean_pct, 0)}%</strong> ({fmt(lso.no_history.mae, 2)} vs{' '}
+          {fmt(lso.baselines.crop_mean.mae, 2)} t/ha). Knowing a series' own past is worth far more
+          than knowing its soil.
+        </Note>
+      </div>
+
+      {/* ─── What the inputs add ────────────────────────────────────── */}
+      {inputAblation.length > 0 && (
+        <div className="section-card fade-in">
+          <div className="section-title">🧬 What each input group adds</div>
+          <p className="section-lede">Same holdout, same model family, input groups added one at a time.</p>
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead><tr><th>Inputs</th><th className="num">MAE (t/ha)</th><th className="num">R²</th></tr></thead>
+              <tbody>
+                {inputAblation.map(a => (
+                  <tr key={a.variant} className={a.variant.includes('shipped') ? 'row-highlight' : ''}>
+                    <td><strong>{a.variant}</strong></td>
+                    <td className="num"><strong>{fmt(a.mae, 3)}</strong></td>
+                    <td className="num muted">{fmt(a.r2, 4)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       {/* ─── Why there are two numbers ──────────────────────────────── */}
       <div className="section-card fade-in">
@@ -100,19 +267,19 @@ export default function ModelPerformance() {
 
       {/* ─── Input sensitivity: the thing accuracy cannot show ──────── */}
       <div className="section-card fade-in">
-        <div className="section-title">🎚️ Input sensitivity — does the model actually respond?</div>
+        <div className="section-title">🎚️ Input sensitivity — how far do field inputs move the forecast?</div>
         <p className="section-lede">
-          A model can score well while ignoring the inputs a user can change. This measures how
-          far the forecast moves when each field input is swept across its realistic range —
+          How far the forecast moves when each field input is swept across its realistic range —
           median over {sens[Object.keys(sens)[0]]?.n_rows ?? 200} held-out rows, with every
-          derived feature rebuilt from the perturbed value.
+          derived feature rebuilt from the perturbed value. A small number is not a bug: see the
+          note below.
         </p>
         <div className="table-scroll">
           <table className="data-table">
             <thead>
               <tr>
                 <th>Input</th><th>Swept across</th>
-                <th className="num">v2 (previous)</th><th className="num">v3 (current)</th>
+                <th className="num">v2</th><th className="num">{m.version} (current)</th>
                 <th style={{ width: '30%' }}>Response</th>
               </tr>
             </thead>
@@ -132,12 +299,15 @@ export default function ModelPerformance() {
             </tbody>
           </table>
         </div>
-        <Note tone="info" title="What changed between v2 and v3">
-          v2 used <code>state</code> as a feature. Because soil and weather are state-level
-          constants here, <code>state</code> was a cleaner split than any agronomic column, so the
-          trees leaned on it and pH response fell to {fmt(sensV2.pH?.median_pct_change ?? 1.13, 2)}%
-          — effectively inert. Dropping <code>state</code> forces the model to locate a field from
-          its soil and climate instead, raising pH response to {fmt(sens.pH?.median_pct_change, 2)}%.
+        <Note tone="warn" title="Why the inputs barely register now">
+          The forecast is last season's recorded yield plus a learned correction, and{' '}
+          <code>state</code> is a feature again. Soil N, P, K and pH are one constant per state, so
+          a model that responds strongly to them (v2 moved {fmt(sensV2.P?.median_pct_change, 0)}% across
+          the phosphorus sweep) can only be recognising which state a row resembles, because soil
+          never varies within a state in the training data.
+          Once the state and its history are known, those inputs carry no extra signal, which is
+          what the table above shows. The what-if sliders therefore describe a region, not a
+          lever. Making them meaningful needs district- or field-level data.
         </Note>
       </div>
 
@@ -188,7 +358,7 @@ export default function ModelPerformance() {
           </div>
           <Note tone="info">
             These figures come from the original study, which included Coconut and used{' '}
-            <code>state</code>. They justify the algorithm choice; the v3 numbers at the top of
+            <code>state</code>. They justify the algorithm choice; the numbers at the top of
             this page describe the model actually being served.
           </Note>
         </div>
@@ -229,7 +399,8 @@ export default function ModelPerformance() {
         <p className="section-lede">
           Impurity-based importance, with one-hot columns summed back into their source feature —
           otherwise <code>crop</code> appears as {'>'}50 individually weak columns instead of one
-          dominant signal.
+          dominant signal. It describes the learned <em>change from last season's yield</em>, not
+          the yield level.
         </p>
         <div style={{ width: '100%', height: Math.max(260, importance.length * 26) }}>
           <ResponsiveContainer>
@@ -262,17 +433,21 @@ export default function ModelPerformance() {
           <table className="data-table">
             <thead>
               <tr><th>Crop</th><th className="num">n</th><th className="num">MAE</th>
+                  <th className="num">Last season MAE</th><th className="num">Skill</th>
                   <th className="num">Mean actual</th><th className="num">Error / mean</th>
-                  <th style={{ width: '26%' }} /></tr>
+                  <th style={{ width: '22%' }} /></tr>
             </thead>
             <tbody>
               {shownCrops.map(c => {
                 const rel = c.mean_actual > 0 ? (c.mae / c.mean_actual) * 100 : 0
+                const cropSkill = c.baseline_mae > 0 ? (1 - c.mae / c.baseline_mae) * 100 : 0
                 return (
                   <tr key={c.crop}>
                     <td><strong>{c.crop}</strong></td>
                     <td className="num muted">{c.n}</td>
                     <td className="num"><strong>{fmt(c.mae, 3)}</strong></td>
+                    <td className="num muted">{fmt(c.baseline_mae, 3)}</td>
+                    <td className="num" style={{ color: skillColor(cropSkill) }}>{signed(cropSkill)}</td>
                     <td className="num muted">{fmt(c.mean_actual, 2)}</td>
                     <td className="num" style={{ color: rel > 50 ? 'var(--red)' : rel > 25 ? 'var(--amber)' : 'var(--green-600)' }}>
                       {fmt(rel, 0)}%
@@ -320,16 +495,29 @@ export default function ModelPerformance() {
       {/* ─── Limits ─────────────────────────────────────────────────── */}
       <div className="section-card fade-in">
         <div className="section-title">🧭 Known limits</div>
-        <Note tone="warn" title="Response is regional, not field-level">
+        <Note tone="warn" title="Why more of the same inputs will not help">
           {dq.known_ceiling}
+        </Note>
+        <Note tone="info" title="Two columns in the source data contain the answer">
+          <code>yield_ma2</code> and <code>yield_change</code> include the current season's yield
+          ({fmt(dq.leakage.yield_ma2_contains_target_pct, 1)}% of rows), so a model trained on them
+          looks accurate while forecasting nothing. They are not used. Every history feature is
+          recomputed from strictly earlier seasons, and <code>test_model.py</code> checks that
+          poisoning all later yields leaves the features unchanged.
+        </Note>
+        <Note tone="info" title="What a forecast needs">
+          {m.forecast_design.requires} {m.forecast_design.anchor}{' '}
+          {m.forecast_design.unscored_test_rows} holdout rows without such a season could not be
+          forecast and are not scored.
         </Note>
         <div className="spec-grid">
           <Spec label="Algorithm" value={m.model} />
           <Spec label="Trees" value={m.hyperparameters.n_estimators} />
           <Spec label="Max depth" value={m.hyperparameters.max_depth} />
-          <Spec label="Features" value={`${m.features.total} (${m.features.numeric} numeric)`} />
-          <Spec label="Dropped vs v2" value={m.features.dropped_vs_v2.join(', ') || '—'} />
+          <Spec label="Features"
+                value={`${m.features.total} (${m.features.numeric} numeric, ${m.features.history.length} history)`} />
           <Spec label="Rows used" value={`${dq.rows_used.toLocaleString('en-IN')} of ${dq.rows_total.toLocaleString('en-IN')}`} />
+          <Spec label="Added in v3.1" value={m.features.added_vs_v3.join(', ')} wide />
           <Spec label="Evaluation" value={m.evaluated_on} wide />
           <Spec label="Shipped artifact" value={m.note} wide />
         </div>

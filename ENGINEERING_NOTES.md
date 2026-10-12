@@ -7,6 +7,11 @@ reproduce the numbers, and understand what the system cannot do.
 Every figure quoted here was measured on this repository. Commands to reproduce them
 are given at the end.
 
+> **Superseded in part.** §§5–9, 11 and 12 describe v3. [§15](#15-phase-0-correction-v31)
+> records the Phase 0 correction (v3.1), which reverses the decision to drop `state`,
+> replaces the responsiveness tests, and re-bases every accuracy claim on baselines.
+> Where the two disagree, §15 is current.
+
 ---
 
 ## Table of contents
@@ -25,6 +30,8 @@ are given at the end.
 12. [Known limitations](#12-known-limitations)
 13. [File manifest](#13-file-manifest)
 14. [Reproducing everything](#14-reproducing-everything)
+15. [Phase 0 correction (v3.1)](#15-phase-0-correction-v31)
+16. [District forecast service (Phase 4, first slice)](#16-district-forecast-service-phase-4-first-slice)
 
 ---
 
@@ -617,6 +624,10 @@ table on the Model Performance page.
 `api.py` requires `model_metrics.json` at startup. Both it and the `.pkl` must be
 committed and present in the container image, or the service will fail to boot.
 
+The deploy target is **Google Cloud Run** (container built from `Dockerfile`) with the
+frontend on Vercel. The `Procfile` and `railway.json` that pointed at other hosts were
+removed in Phase 0. Set `CORS_ORIGINS` on the Cloud Run service — see §15.5.
+
 ---
 
 ## 14. Reproducing everything
@@ -627,16 +638,19 @@ Retrain and regenerate every metric (~30 s):
 python train_v3.py
 ```
 
-Verify the model contract, including that inputs still move the forecast:
+Verify the model contract (no lookahead, history drives the forecast, metrics are
+baseline-referenced) and the API's failure behaviour:
 
 ```bash
 python test_model.py
+python test_api.py
 ```
 
 Confirm the bundled frontend seed data still matches the live API:
 
 ```bash
-node frontend/check-constants.mjs
+node frontend/check-constants.mjs                          # against the deployed API
+API_BASE=http://localhost:8000 node frontend/check-constants.mjs   # against a local one
 ```
 
 Check the within-state-year variation claim from §3.1 yourself:
@@ -646,3 +660,177 @@ python -c "import pandas as pd; d=pd.read_csv('master_dataset_enhanced.csv'); pr
 ```
 
 All three commands should be run after any change to the dataset or the model.
+
+---
+
+## 15. Phase 0 correction (v3.1)
+
+`PRODUCTION_ROADMAP.md` §1 measured that the shipped v3 model lost to trivial baselines.
+This section records what was changed in response, and what the changes found.
+
+### 15.1 What was wrong
+
+v3 scored R² 0.92 and MAE 1.00 t/ha. On the same holdout, repeating last season's
+recorded yield scored MAE 0.62. The model never saw a series' own history, and `state`
+had been removed (§5.1) to make soil sliders responsive, which is the wrong trade for a
+product that forecasts a state's next season. R² against zero hid both.
+
+### 15.2 What changed
+
+| Area | Change |
+|---|---|
+| History | `forecasting.py`: lag 1–3, 3-season mean, trend, season count and an `anchor` (last season's yield), computed per state × crop × season from **strictly earlier calendar years**. Shared by training, evaluation and the API. |
+| Model | `AnchoredRegressor` learns the *change from the anchor*, not the yield. Same Extra Trees pipeline inside, so the per-tree interval in `api.py` still works. `state` is a feature again. |
+| Leakage | The CSV's `yield_ma2` and `yield_change` contain the current season's yield (94.9% of rows). Never used; the check is stored in `model_metrics.json → data_quality.leakage`. `yield_lag1` is recomputed, not read. |
+| Evaluation | Four baselines on identical rows, a **skill score** (`1 − model MAE ÷ baseline MAE`) against the strongest, **leave-states-out** (5 folds), **rolling origin** (test years 2015–2020, each trained on earlier years only), and an input-group ablation. |
+| API | Unknown crop/season/state and out-of-range numbers are 422. A series with no recorded season in the 3 years before the forecast year is a 422 with the reason. Any exception inside the forecast is a 500 (it used to return a silent `0.0`). `build_row` no longer zero-fills a missing feature. Labels are stripped once at load, which also fixes `/api/historical` for padded labels. |
+| Invented content | Removed "yield may increase by 8-12%", "increase phosphorus by ~10%" and the unsourced "optimisation tip". The remaining scores and notes are labelled as fixed-threshold rules of thumb, not model output. |
+| Frontend | Model Performance leads with skill vs baseline. Dashboard shows the baseline beside the forecast and reports server errors instead of `undefined%`. Crop/season dropdowns offer only combinations with records. R² is no longer quoted without its baseline. |
+
+### 15.3 Results
+
+2018–2020 holdout, one season ahead, 2,102 forecastable rows (60 test rows with no prior
+season cannot be forecast and are not scored). Coconut excluded.
+
+| Predictor | MAE (t/ha) | R² |
+|---|---|---|
+| Crop mean | 2.268 | 0.683 |
+| State × crop × season mean | 1.076 | 0.890 |
+| Mean of previous 3 seasons | 0.665 | 0.931 |
+| **v3.1 model** | **0.677** | **0.937** |
+| Last season repeated | 0.617 | 0.924 |
+
+**Skill vs the strongest baseline: −9.6%** (−1.8% vs the 3-season mean). The error fell
+from 1.00 to 0.68 t/ha, but the model still does not beat repeating last season.
+
+| Check | Result |
+|---|---|
+| Core staples (excl. Sugarcane) | MAE 0.576, skill −7.4% |
+| Leave-states-out | MAE 0.728 vs 0.645 for last season, skill −12.8% |
+| Unseen state, no history at all | MAE 2.04 vs 2.36 for a crop average: agronomic inputs alone are worth 13% |
+| Rolling origin 2015 → 2019 | Skill vs last season −13.4%, −7.2%, −5.0%, −29.2%, −5.2%. 2020 is +9.7% but has 37 rows. |
+| Ablation | No history 0.978 · history only 0.664 · history + weather + soil (shipped) 0.677 |
+
+### 15.4 Decisions and their limits
+
+- **The model choice is not tuned to the holdout, and it does not matter much.** Variants
+  (raw vs anchored target, with and without weather and state) were compared first on the
+  2018–2020 holdout during exploration, then re-checked on 2015–2017 validation years. On
+  both they sat within the year-to-year noise of one another (validation MAE 0.756–0.778),
+  and on both none beat repeating last season (0.710 on validation). The anchored model
+  with weather and state was kept for what it preserves — the per-tree interval, live
+  weather inputs, a smaller artifact — not for a measured accuracy gain.
+- **Weather and soil add nothing measurable once history is known** (ablation above; the
+  history-only model is marginally better). Soil is one constant per state and weather one
+  value per state-year, so this is a data limit, not an algorithm one. This is the
+  motivation for district-level data (Phase 1).
+- **Soil and weather sliders now barely move the forecast** (median response ≤ 0.7% across
+  a full sweep). v2's 32–44% response to N and P was the model recognising a state from
+  its constant soil values, not agronomy. The Prediction page says so; whether to keep or
+  remove the sliders is a Phase 4 product decision.
+- **2020 has 37 records** against 1,000–1,080 in each of 2015–2019, so "2018–2020" is in
+  effect 2018–2019. The rolling-origin table shows `n` per year for this reason.
+- **A forecast needs history.** 17% of state × crop × season combinations exist, so the
+  API refuses the rest rather than forecast from nothing. `/api/options` returns the valid
+  `series` map and the UI offers only those.
+- **Forecast years run to `year_max + 1` (2021).** For most series 2020 is missing, so a
+  2021 forecast is two seasons ahead. Only one-season-ahead accuracy was measured; the
+  response reports `baseline.last_recorded_year` so the horizon is visible.
+- `avg_yield`, `diff_pct` and the productivity badge now compare with the series' own
+  record before the forecast year. They used the crop's all-India average, which mixes
+  states and seasons several-fold apart and labelled a series that is always high as "HIGH
+  PRODUCTIVITY" whatever the forecast did (Andhra Pradesh arecanut read "+264%" while the
+  forecast was +4% on last season).
+
+### 15.5 Deployment
+
+- **Target: Google Cloud Run** (`Dockerfile`), frontend on Vercel. `Procfile` and
+  `railway.json` were removed.
+- **Set `CORS_ORIGINS` on the Cloud Run service** to the frontend's origin, e.g.
+  `https://<project>.vercel.app` (comma-separated for more than one). CORS used to be `*`
+  with credentials. The default now allows only `localhost:5173` and `localhost:4173`, so
+  a deploy that omits the variable blocks the production frontend rather than opening the API.
+- The model file is 5.6 MB (was 16.8 MB): the anchored target is a small correction, so the
+  trees are shallower.
+- `VITE_API_BASE` points the frontend at a local API (`frontend/.env.local`, gitignored).
+  `.claude/launch.json` has `api` and `frontend-dev` entries for this.
+
+### 15.6 Files
+
+Added: `forecasting.py`, `test_api.py`. Modified: `train_v3.py`, `features.py`, `api.py`,
+`test_model.py`, `model_metrics.json` and `crop_yield_model_v3.pkl` (regenerated), and the
+frontend pages that read them. Removed: `Procfile`, `railway.json`.
+
+---
+
+## 16. District forecast service (Phase 4, first slice)
+
+The research behind it is in `PRODUCTION_ROADMAP.md` (Phase 1 criteria C1–C5, Phase 2, Gate G1) and `data/DATA_CARD.md`.
+This section is only about what is served and how to run and deploy it.
+
+### 16.1 What is served, and what is deliberately not
+
+- **History-only** forecasts for **Rice and Maize (Kharif)** and **Wheat (Rabi)**, per district, for agricultural years **2025 and 2026**.
+- **One season of publication lag.** District yields are published more than a year late, so a forecast for year *Y* uses
+  seasons ≤ *Y*−2 (`forecasting.add_history(..., shift=1)`). Gate G1 re-ran Phase 2 under that lag: the history-only model is
+  +9.1% against the last published season and +2.7% against the 3-season mean on 2018–23 (+10.9% / +4.3% on 2024).
+- **No weather or NDVI at serving time.** Under the lag they added about 1% of MAE on 2018–23 and nothing on 2024, and
+  they would need a live feed (IMD, NASA POWER and Earth Engine all have lags, quotas and licences). They remain an optional
+  later layer.
+- **Per group, it is not the same story:** Wheat is +8.8% over the 3-season mean (2018–23; +7.0% on 2024), Kharif Rice + Maize
+  only +2.2% (+2.2% on 2024), a small margin over the average. The page's wording has three tiers (below 2%, 2–5%, above 5%) and
+  is generated from `serving/models/district_<group>.json`, so it moves with the numbers.
+- **The trees are small on purpose:** leaf 20, 100 trees (`ET_SERVING`), 5.1 MB for both models against 55 MB. A size
+  experiment under pre-registered criteria found them as accurate, slightly better on 2018–23 (see the roadmap).
+- **Intervals:** 80%, conformal calibrated separately for volatile and stable series (flag = recent yield volatility in the top 20%
+  of training rows) on the last three out-of-sample years. A single calibration year was too noisy (flagged-wheat quantile
+  0.24–0.42 across years, as few as 39 rows). Coverage of volatile series has still been only about 67–80% in backtests.
+- **Madhya Pradesh** forecasts carry a note: its district figures are about twice the Centre's official wheat totals.
+
+### 16.2 Files
+
+| File | Role |
+|---|---|
+| `district_forecast.py` | `python district_forecast.py` trains and saves `models/district_<group>.{pkl,json}`; `DistrictForecaster` serves |
+| `api.py` | `/api/district/options`, `/api/district/forecast`, `/api/district/track-record`; 422 for a request that cannot be forecast, 503 if the files are absent |
+| `frontend/src/pages/DistrictForecast.jsx` | the page; `useGet` in `pages/api.js` is a lint-clean fetch hook |
+| `pipeline/build_map_shapes.py` | simplifies the 706 matched outlines (0.02°, 2 decimals, holes and specks dropped) to `data/processed/district_shapes.json` (0.43 MB) |
+| `frontend/src/pages/DistrictMap.jsx` | the map: plain SVG with a hand-written equirectangular projection (cos φ correction), no map library; colour by change vs last published / vs 3-season mean / level; hatching marks volatile series; a click hands `{state, district, series, year}` to the forecast page through `App.jsx` |
+| `test_district.py` | publication lag enforced (poisoning 2024 does not move a 2025 forecast; poisoning 2023 does), refusals, interval and flag contract, out-of-sample track record |
+| `pipeline/phase2_forecast.py` | produces the out-of-sample predictions the track record and calibration read (`HIST_SHIFT=1`) |
+
+### 16.3 Running and deploying
+
+```bash
+python pipeline/phase2_forecast.py            # once, with HIST_SHIFT=1 for the lagged run (writes *_shift1 files)
+python district_forecast.py                   # trains the serving models
+python test_district.py
+```
+
+Runtime needs: everything is under **`serving/`, which is tracked in git (6.5 MB)**, so a GitHub-triggered build has it:
+`serving/models/district_<group>.{pkl,json}` (3.4 + 1.7 MB), `district_series.parquet` (the trimmed history the forecast is built
+from), `track_record.parquet` (out-of-sample lead-0 forecasts), `district_shapes.json` (0.43 MB). `python district_forecast.py`
+trains the models, runs their own rolling-origin backtest for calibration, and writes all of it. `requirements.txt` includes
+`pyarrow` for the parquet reads, and the API gzips responses (the outlines are 0.43 MB raw, 110 KB gzipped). A `.dockerignore`
+keeps the image to the API's files only.
+
+**`deploy/stage_build.py` lists what ships and is the local check before a push.** It copies exactly the files in MANIFEST (22.5 MB) into a clean folder
+(default `D:/agripredict-build`), checks the API imports from that folder alone, and prints the size. Build and deploy from
+that folder. It replaces `.dockerignore` / `.gcloudignore`, for two reasons: a git-based build leaves the gitignored models
+out (the district endpoints would answer 503), and on this machine the checkout is in OneDrive, where many files are cloud
+placeholders (`ReparsePoint`) that Docker's build context refuses ("invalid file request"); copying with `shutil` reads them.
+
+**Container test, run 2026-10-12 (local Docker, not Cloud Run):** the image builds from the unchanged `Dockerfile` with the
+pinned `requirements.txt` (numpy 1.26.4, pandas 2.2.3, scikit-learn 1.8.0, pyarrow 23.0.0 install together; pickles trained under
+numpy 2.x load under 1.26). Image 1.06 GB; ready in 3 s; every endpoint answered (state predict 0.11 s, district options 0.29 s on
+first call, map 0.63 s, shapes 0.25 s); 422s and the CORS allow/refuse behaviour as designed. With the original 55 MB models memory
+was 492 MiB after all models were loaded; with the 5 MB ones it is **213 MiB** (image 949 MB), comfortably inside the live
+service's 1 GiB.
+
+### 16.4 Limits worth knowing
+
+- The deployed frontend still needs `CORS_ORIGINS` set (§15.5); the new page calls the same API.
+- Forecasts for 2025 cannot be checked yet: its yields are unpublished. The track record shows only past, out-of-sample seasons.
+- Only 706 of 752 districts have a boundary, and the model was validated on those; the others are not offered.
+- The map's "change vs last published" mostly shows a recent unusual season bouncing back, which the page says; for Kharif Rice + Maize the model is about as good as the 3-season mean, so the map should not be read as more than that. Outlines are simplified for drawing, not for area.
+- Weekly refresh, "change since last update", alerts and a keyed B2B endpoint are not built.

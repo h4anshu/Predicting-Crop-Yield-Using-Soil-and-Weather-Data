@@ -11,6 +11,8 @@ tests all go through this module rather than rebuilding the formulas locally.
 
 import pandas as pd
 
+from forecasting import add_history
+
 # The raw inputs a caller supplies; everything else is derived from them.
 RAW_INPUTS = [
     "N", "P", "K", "pH", "avg_temp_c", "total_rainfall_mm", "avg_humidity_percent",
@@ -50,6 +52,12 @@ def add_derived(df):
     return df
 
 
-def build_row(payload, model_features):
-    """One request dict -> a single-row frame ordered for the model."""
-    return add_derived(pd.DataFrame([payload])).reindex(columns=model_features, fill_value=0)
+def build_row(payload, model_features, panel):
+    """One request dict -> a single-row frame ordered for the model.
+
+    Derived columns and yield history are both rebuilt here. A column the model expects
+    but this cannot produce raises KeyError: the previous `reindex(fill_value=0)` turned
+    a missing feature into a silent zero, the same failure class as an unstripped label.
+    """
+    row = add_history(add_derived(pd.DataFrame([payload])), panel)
+    return row[model_features]
