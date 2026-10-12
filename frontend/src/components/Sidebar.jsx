@@ -1,16 +1,19 @@
 const NAV_ITEMS = [
   { id: 'dashboard', icon: '🏠', label: 'Dashboard' },
-  { id: 'district', icon: '🗺️', label: 'District Forecast' },
+  { id: 'district', icon: '🗺️', label: 'District Outlook' },
   { id: 'map', icon: '🧭', label: 'District Map' },
-  { id: 'prediction', icon: '🔮', label: 'Prediction' },
   { id: 'trends', icon: '📊', label: 'Historical Trends' },
   { id: 'insights', icon: '🌾', label: 'Crop Insights' },
   { id: 'soil', icon: '🧪', label: 'Soil & Climate' },
-  { id: 'model', icon: '📈', label: 'Model Performance' },
+  { id: 'model', icon: '📈', label: 'Model & Evidence' },
   { id: 'about', icon: 'ℹ️', label: 'About Project' },
 ]
 
+const n = v => (v == null ? '—' : Number(v).toLocaleString('en-IN'))
+
 export default function Sidebar({ activePage, onPageChange, stats }) {
+  const d = stats?.dataset
+  const o = stats?.outlook
   return (
     <>
       {/* Brand */}
@@ -40,36 +43,29 @@ export default function Sidebar({ activePage, onPageChange, stats }) {
 
       <hr className="sidebar-divider" />
 
-      {/* Model info */}
+      {/* Dataset and model info */}
       <div className="sidebar-info">
-        <div className="sidebar-info-title">Model Information</div>
+        <div className="sidebar-info-title">Data &amp; Model</div>
 
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Model</div>
-          <div className="sidebar-info-value">Extra Trees Regressor</div>
+          <div className="sidebar-info-label">Records</div>
+          <div className="sidebar-info-value">{n(d?.rows)}</div>
         </div>
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Skill vs last season</div>
-          <div className="sidebar-info-value accent">
-            {stats?.skill_vs_baseline_pct == null ? '—'
-              : `${stats.skill_vs_baseline_pct > 0 ? '+' : ''}${stats.skill_vs_baseline_pct}%`}
-          </div>
+          <div className="sidebar-info-label">Years covered</div>
+          <div className="sidebar-info-value">{d ? `${d.year_min} – ${d.year_max}` : '—'}</div>
         </div>
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Data Records</div>
-          <div className="sidebar-info-value">{stats?.total_records?.toLocaleString() || '19,689'}</div>
+          <div className="sidebar-info-label">Districts · states</div>
+          <div className="sidebar-info-value">{d ? `${n(d.districts)} · ${d.states_uts}` : '—'}</div>
         </div>
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Years Covered</div>
-          <div className="sidebar-info-value">{stats?.years_covered || '1997 - 2020'}</div>
+          <div className="sidebar-info-label">Crops with an outlook</div>
+          <div className="sidebar-info-value">{o ? `${o.crops_offered} of ${d?.crops ?? o.crops_offered}` : '—'}</div>
         </div>
         <div className="sidebar-info-item">
-          <div className="sidebar-info-label">Crops</div>
-          <div className="sidebar-info-value">{stats?.crops_covered || 55}</div>
-        </div>
-        <div className="sidebar-info-item">
-          <div className="sidebar-info-label">States</div>
-          <div className="sidebar-info-value">{stats?.states_covered || 30}</div>
+          <div className="sidebar-info-label">80% range held</div>
+          <div className="sidebar-info-value accent">{o ? `${Math.round(100 * o.range_coverage.dev_2018_2023)}%` : '—'}</div>
         </div>
       </div>
 

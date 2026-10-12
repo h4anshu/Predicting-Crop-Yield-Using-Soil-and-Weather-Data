@@ -31,6 +31,9 @@ HISTORY_FEATURES = [
     "yield_anchor",       # last season's yield; mean of the lags that exist if it is missing
 ]
 
+# The scale-free design of the pooled model (sugarcane and pulses share it): every history column divided by the anchor.
+REL_NUM = ["year", "history_seasons", "r1", "r2", "r3", "rm", "rt", "log_anchor"]
+
 
 def build_panel(df, key=SERIES_KEY):
     """Yield by (*key, year). Index must be unique and labels stripped. `key` defaults to the
@@ -53,6 +56,17 @@ def add_history(df, panel, key=SERIES_KEY, shift=0):
     df["yield_mean3"] = lags.mean(axis=1)
     df["yield_trend"] = (df["yield_lag1"] - df["yield_lag3"]) / 2
     df["yield_anchor"] = df["yield_lag1"].fillna(df["yield_mean3"])
+    return df
+
+
+def relative(df):
+    """Add REL_NUM's ratio columns and `one` (the anchor of a relative model: it learns yield / anchor - 1)."""
+    a = df["yield_anchor"]
+    df = df.copy()
+    for k in LAGS:
+        df[f"r{k}"] = df[f"yield_lag{k}"] / a
+    df["rm"], df["rt"] = df["yield_mean3"] / a, df["yield_trend"] / a
+    df["log_anchor"], df["one"] = np.log(a), 1.0
     return df
 
 

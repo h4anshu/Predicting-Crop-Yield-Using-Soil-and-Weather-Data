@@ -1,67 +1,56 @@
 """
-District yield forecasts for serving (Phase 4, first slice): history-only, publication-lag aware.
+District outlook: the expected yield of a crop in a district, from the master table, with a tested range.
 
-    python district_forecast.py        train and save the serving models  (needs data/processed/*, pipeline/)
+    python district_forecast.py        build the serving files (needs data/processed/master_panel.parquet and the
+                                       results of `python pipeline/train_master.py`)
 
-What is served, and why it is this and not more:
-  * Rice and Maize (Kharif) share one model, Wheat (Rabi) has its own. Both are the anchored Extra Trees validated in
-    Phase 2, fitted on every season up to 2024, with `year`, the district's recorded history and crop / season / state.
-  * History is lagged by one season (Gate G1): for a forecast of agricultural year Y the most recent season used is
-    Y-2, because district yields are published more than a year late. `forecast_year` is therefore 2025 or 2026.
-  * No weather or NDVI. Under that lag they bought about 1% of MAE on 2018-23 and nothing on 2024, and they would need
-    a live feed. They can be added later as an in-season update.
-  * The 80% interval is conformal calibrated per trust flag (Mondrian) on the last three out-of-sample years:
-    volatile series get wider intervals, so their coverage is not dragged below the nominal level by the stable
-    ones. Volatile-series coverage has still been only about 67-80% in backtests, and is disclosed as approximate.
+What is served, and why it is this and not a model (the evidence is in PRODUCTION_ROADMAP.md, "One table, one model",
+Amendments A1 and A2, and in pipeline/train_master.py, which makes every decision recorded here):
+  * The expected yield is the mean of the last three PUBLISHED seasons of the series. A pooled machine-learning model
+    trained on the whole master table (63 crops) was tested the way a forecaster would meet the data, with a one-season
+    publication lag and training only on what would have been published by then; no crop beat that mean by the bar set in
+    advance, so none is served. The mean itself beat repeating the last published season for most crops.
+  * History is lagged by one season: for a forecast of agricultural year Y the most recent season used is Y-2, because
+    district yields are published more than a year late. `forecast_year` is therefore 2025 or 2026.
+  * The 80% range is conformal around that mean, calibrated per crop and volatility flag on the last three out-of-sample
+    years (Mondrian): volatile series get wider ranges. Its coverage was tested in advance (B1).
+  * No weather, satellite or soil input: under the lag they bought about 1% and fell short of every bar.
 
-Everything the model knows about a series is returned with the forecast (last published season, 3-season mean, recent
-history, whether the series is volatile, how the model did on past seasons), so a reader can judge it.
+Everything the outlook rests on is returned with it (last published season, recent history, whether the series is
+volatile, how the mean and the tested model did on seasons they had not seen), so a reader can judge it.
 """
 
 import json
 import math
 import os
+import shutil
+import sys
 
-import joblib
 import numpy as np
 import pandas as pd
 
-from forecasting import HISTORY_FEATURES, add_history, build_panel
+from forecasting import add_history, build_panel
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PROC = os.path.join(ROOT, "data", "processed")           # training inputs; not needed to serve
-SERVING = os.path.join(ROOT, "serving")                   # everything the service reads; tracked in git (~7 MB)
-MODEL_DIR = os.path.join(SERVING, "models")
+SERVING = os.path.join(ROOT, "serving")                   # everything the service reads; tracked in git
+CARD_PATH = os.path.join(SERVING, "outlook.json")
 SERIES_PATH = os.path.join(SERVING, "district_series.parquet")
 TRACK_PATH = os.path.join(SERVING, "track_record.parquet")
 SHAPES_PATH = os.path.join(SERVING, "district_shapes.json")
-# Smaller than the validated-by-default trees (32.7 + 22.4 MB): leaf 20 and 100 trees pickle to ~5 MB in total and
-# were as accurate in the size experiment (PRODUCTION_ROADMAP.md, "Model size for serving"; pipeline/shrink_experiment.py).
-ET_SERVING = dict(min_samples_leaf=20, n_estimators=100)
 
 KEY = ["district_code", "crop", "season"]
 SHIFT = 1
 DATA_END = 2024
 CAL_YEARS = (2022, 2023, 2024)
 FORECAST_YEARS = (DATA_END + 1, DATA_END + 2)       # 2025 and 2026: the seasons not yet published
-HIST = ["year"] + HISTORY_FEATURES
-CATS = ["crop", "season", "state_name"]
-GROUPS = {
-    "kharif_rice_maize": {"label": "Kharif Rice + Maize", "crops": ("Rice", "Maize"), "season": "Kharif", "p2": "Kharif Rice + Maize"},
-    "wheat_rabi": {"label": "Wheat (Rabi)", "crops": ("Wheat",), "season": "Rabi", "p2": "Wheat (Rabi)"},
-}
-STAPLES = ["Rice", "Maize", "Wheat"]
+MIN_CAL_ROWS = 100                                   # per crop and flag; fewer falls back to the pooled quantile
+MIN_MAP_DISTRICTS = 20                               # a crop and season grown in fewer districts is not offered as a map
+METHOD = "the mean of the last three published seasons"
 
 
 class ForecastError(ValueError):
-    """A request that cannot be forecast, with a reason a user can act on."""
-
-
-def group_of(crop, season):
-    for name, g in GROUPS.items():
-        if crop in g["crops"] and season == g["season"]:
-            return name
-    return None
+    """A request that cannot be answered, with a reason a user can act on."""
 
 
 def conformal_q(rel, level=0.8):
@@ -72,161 +61,176 @@ def conformal_q(rel, level=0.8):
 
 
 def _volatility(df):
-    """Recent jumpiness of a series relative to its level (same definition as Phase 2)."""
+    """Recent jumpiness of a series relative to its level (same definition as the evaluation)."""
     return ((df["yield_lag1"] - df["yield_lag2"]).abs() + (df["yield_lag2"] - df["yield_lag3"]).abs()) / 2 / df["yield_mean3"]
 
 
-def _training_frame():
-    """Training-side view: staple series with a valid yield, up to DATA_END, for districts that have a boundary."""
-    g = pd.read_parquet(os.path.join(PROC, "district_yield.parquet"))
-    g = g[g.crop.isin(STAPLES) & g.valid_yield & ~g.flag_outlier & (g.year <= DATA_END)].copy()
-    geo = pd.read_parquet(os.path.join(PROC, "district_geo.parquet"))[["district_code", "shape_id"]]
-    return g.merge(geo, on="district_code").dropna(subset=["shape_id"])      # same districts the model was validated on
-
-
-def _panel_frame():
-    """Serving-side view: the trimmed export written by train()."""
-    return pd.read_parquet(SERIES_PATH)
-
-
-# ── training ────────────────────────────────────────────────────────────────────────────────────
-def train():
-    """Fit the serving models, run their own out-of-sample backtest, and export everything serving needs to `serving/`.
-    Phase 2's own code builds the rows, so the served model is the validated design, not a re-implementation. The
-    calibration, trust flag and skill figures come from THIS configuration's rolling-origin forecasts, never from a
-    different one."""
-    os.environ["HIST_SHIFT"] = str(SHIFT)
-    import functools
-    import shutil
-    import sys
+# ── build ───────────────────────────────────────────────────────────────────────────────────────
+def build():
+    """Write the serving files from the master table and the recorded evaluation. Nothing is fitted here: the mean needs no
+    training, and the model that was tested did not clear its bar. Only the ranges are calibrated, on the last three
+    out-of-sample years of the series' own mean."""
     sys.path.insert(0, os.path.join(ROOT, "pipeline"))
-    import phase2_forecast as P2
-    from train_v3 import build_model
+    import train_master as T
 
-    et_model = functools.partial(build_model, et=ET_SERVING)
-    P2.build_model, P2.FIT_LEADS = et_model, [0]
-    g = P2.load()
-    preds = pd.concat([P2.run_group(spec["p2"], P2.GROUPS[spec["p2"]], g) for spec in GROUPS.values()], ignore_index=True)
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    for slug, spec in GROUPS.items():
-        p2 = P2.GROUPS[spec["p2"]]
-        d = P2.attach(g[p2["sel"](g)], p2["window"], p2["weather"])
-        d = d.dropna(subset=P2.lead_cols(120, p2["weather"])).reset_index(drop=True)   # same rows as the validation
-        model = et_model(HIST, CATS).fit(d[HIST + CATS], d["yield"])
-        joblib.dump(model, os.path.join(MODEL_DIR, "district_%s.pkl" % slug), compress=3)
-        # Mondrian calibration from the last three out-of-sample years (each forecast made by a model trained on
-        # earlier years only). One year was too noisy: the flagged-wheat quantile ranged 0.24-0.42 across years and
-        # rested on as few as 39 rows, so three years are pooled.
-        r = preds[(preds.group == spec["p2"]) & (preds.lead == 0) & (preds.year.isin(CAL_YEARS))].copy()
-        r["rel"] = (r["yield"] - r["pred"]).abs() / np.maximum(r["pred"], 0.05)
-        meta = {"label": spec["label"], "trained_through": DATA_END, "history_lag_seasons": SHIFT, "rows": int(len(d)),
-                "districts": int(d.district_code.nunique()), "vol_threshold": float(d["vol"].quantile(0.8)),
-                "q_flagged": conformal_q(r[r.flag_low_trust].rel), "q_unflagged": conformal_q(r[~r.flag_low_trust].rel),
-                "calibration_rows": int(len(r)), "skill": group_skill(preds, spec["p2"]), "trees": ET_SERVING}
-        with open(os.path.join(MODEL_DIR, "district_%s.json" % slug), "w", encoding="utf-8") as f:
-            json.dump(meta, f, indent=2)
-        print("%-22s rows %6d | districts %d | vol threshold %.3f | q flagged %.3f unflagged %.3f | %.1f MB" % (
-            spec["label"], len(d), meta["districts"], meta["vol_threshold"], meta["q_flagged"], meta["q_unflagged"],
-            os.path.getsize(os.path.join(MODEL_DIR, "district_%s.pkl" % slug)) / 1e6))
+    with open(os.path.join(PROC, "master_models_metrics.json"), encoding="utf-8") as f:
+        ev = json.load(f)
+    b1, m3 = ev["b1"], ev["m3"]
+    offered = sorted(b1["per_crop"])
+    d = T.load()
+    d = d[d.crop.isin(offered)]
+    valid = T.valid_rows()
+    valid = valid[valid.crop.isin(offered)]
 
-    # trimmed data the service reads at runtime
-    cols = ["district_code", "district_name", "state_name", "crop", "season", "year", "yield", "shape_id"]
-    _training_frame()[cols].to_parquet(SERIES_PATH, index=False)
-    keep = ["district_code", "crop", "season", "year", "pred", "yield", "yield_anchor"]
-    preds[preds.lead == 0][keep].to_parquet(TRACK_PATH, index=False)
+    thr = float(d["vol"].quantile(0.8))
+    cal = d[d.year.isin(CAL_YEARS)].copy()
+    cal["rel"] = (cal["yield"] - cal["yield_mean3"]).abs() / cal["yield_mean3"]
+    cal["flag"] = cal["vol"] >= thr
+    pooled = {f: conformal_q(cal.loc[cal.flag == f, "rel"]) for f in (True, False)}
+    crops = {}
+    for crop in offered:
+        g = cal[cal.crop == crop]
+        q = {f: (conformal_q(g.loc[g.flag == f, "rel"]) if (g.flag == f).sum() >= MIN_CAL_ROWS else None) for f in (True, False)}
+        mod = m3["per_crop"][crop]
+        crops[crop] = {
+            "q_flagged": q[True] if q[True] is not None else pooled[True], "q_unflagged": q[False] if q[False] is not None else pooled[False],
+            "range_from_pooled": bool(q[True] is None or q[False] is None),
+            "mean3": b1["per_crop"][crop],                                  # the mean against the last published season
+            "model": {"dev": mod["dev"], "confirm_2024": mod["confirm_2024"], "years_better_than_mean3": mod["years_better_than_mean3"]}}  # the model that failed
+    track = d[d.year >= 2018]
+    series_n = int(valid.groupby(KEY).ngroups)
+
+    card = {
+        "method": METHOD, "data_through": DATA_END, "history_lag_seasons": SHIFT, "forecast_years": list(FORECAST_YEARS),
+        "vol_threshold": thr, "ranges": {"calibration_years": list(CAL_YEARS), "pooled_q_flagged": pooled[True], "pooled_q_unflagged": pooled[False],
+                                         "min_rows_per_crop_and_flag": MIN_CAL_ROWS},
+        "crops": crops,
+        "criteria": {
+            "M1": {"first_protocol": {"pass": ev["m1_first_protocol"]["pass"], "groups": _group_skill(ev["m1_first_protocol"])},
+                   "lag_consistent": {"groups": _group_skill(ev["m1"])}},
+            "M2": {"pass": ev["m2"]["pass"], "dev_gain_pct": ev["m2"]["pooled"]["dev"]["gain_pct"], "gain_2024_pct": ev["m2"]["pooled"]["confirm_2024"]["gain_pct"],
+                   "gain_by_year_pct": ev["m2"]["dev_gain_by_year_pct"],
+                   "first_protocol": {"pass": ev["m2_first_protocol"]["pass"], "dev_gain_pct": ev["m2_first_protocol"]["pooled"]["dev"]["gain_pct"]}},
+            "M3": {"pass": m3["pass"], "crops_tested": len(m3["per_crop"]), "crops_served": len(m3["served"]), "leaf": m3["leaf"],
+                   "near_misses": sorted(({"crop": c, "dev_skill_vs_mean3_pct": v["dev"]["skill_vs_mean3_pct"], "years_better": v["years_better_than_mean3"],
+                                           "skill_2024": v["confirm_2024"].get("skill_vs_mean3_pct")}      # None: no 2024 rows for this crop
+                                          for c, v in m3["per_crop"].items() if v["dev"]["n"] >= 300 and v["dev"].get("skill_vs_mean3_pct", -99) >= 2.0),
+                                         key=lambda x: -x["dev_skill_vs_mean3_pct"]),
+                   "staples_in_pooled": {g: v["dev"]["skill_vs_mean3_pct"] for g, v in m3["staples_in_pooled"].items()}},
+            "B1": {"pass": b1["pass"], "coverage": b1["coverage"]},
+        },
+        "headline": {
+            "crops_offered": len(offered), "model_crops_tested": len(m3["per_crop"]), "model_crops_beating_mean": len(m3["served"]),
+            "mean_beats_last_published_crops": b1["crops_mean3_beats_last"], "series": series_n, "districts": int(valid.district_code.nunique()),
+            "range_coverage": {"dev_2018_2023": b1["coverage"]["dev"], "confirm_2024": b1["coverage"]["confirm_2024"]},
+            "data_through": DATA_END, "forecast_years": list(FORECAST_YEARS), "method": METHOD},
+    }
+    os.makedirs(SERVING, exist_ok=True)
+    shutil.rmtree(os.path.join(SERVING, "models"), ignore_errors=True)      # the previous generation's pickles are not part of this one
+    with open(CARD_PATH, "w", encoding="utf-8") as f:
+        json.dump(card, f, indent=1)
+
+    # the data the service reads at runtime: every offered series' history, and the out-of-sample record of the mean
+    valid[["district_code", "district_name", "state_name", "crop", "season", "year", "yield", "shape_id"]].to_parquet(SERIES_PATH, index=False, compression="zstd")
+    track = track.rename(columns={"yield_mean3": "pred"})
+    track[["district_code", "crop", "season", "year", "pred", "yield", "yield_anchor"]].to_parquet(TRACK_PATH, index=False, compression="zstd")
     shutil.copyfile(os.path.join(PROC, "district_shapes.json"), SHAPES_PATH)
     total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(SERVING) for f in fs)
+    print("headline:", card["headline"])
     print("serving/ total %.1f MB" % (total / 1e6))
 
 
-def group_skill(preds, group):
-    """The skill figures a reader needs for ONE group, from the Gate G1 run (one-season publication lag, history-only
-    lead): MAE against the last published season and the 3-season mean, on 2018-23 and on the 2024 confirmation year."""
-    out = {}
-    for label, years in (("dev_2018_2023", range(2018, 2024)), ("confirm_2024", [DATA_END])):
-        x = preds[(preds.group == group) & (preds.lead == 0) & preds.year.isin(list(years))]
-        m = float((x["yield"] - x["pred"]).abs().mean())
-        lp = float((x["yield"] - x["yield_anchor"]).abs().mean())
-        m3 = float((x["yield"] - x["yield_mean3"]).abs().mean())
-        out[label] = {"n": int(len(x)), "mae": round(m, 4), "last_published_mae": round(lp, 4), "mean3_mae": round(m3, 4),
-                      "skill_vs_last_published_pct": round(100 * (1 - m / lp), 1), "skill_vs_mean3_pct": round(100 * (1 - m / m3), 1)}
-    return out
+def _group_skill(m1):
+    return {g: {"dev_skill_vs_mean3_pct": v["dev"]["skill_vs_mean3_pct"], "skill_2024_vs_mean3_pct": v["confirm_2024"]["skill_vs_mean3_pct"]}
+            for g, v in m1["groups"].items()}
 
 
 # ── serving ─────────────────────────────────────────────────────────────────────────────────────
 class DistrictForecaster:
     def __init__(self):
-        self.frame = _panel_frame()
+        self.frame = pd.read_parquet(SERIES_PATH)
         self.panel = build_panel(self.frame, KEY).sort_index()
         self.series = self.frame.groupby(KEY).year.agg(["min", "max"])
-        self.names = (self.frame.sort_values("year").groupby("district_code")[["district_name", "state_name"]].last())
+        self.names = self.frame.sort_values("year").groupby("district_code")[["district_name", "state_name"]].last()
         self.shape_ids = self.frame.groupby("district_code").shape_id.first()
-        self._models, self._meta = {}, {}
+        with open(CARD_PATH, encoding="utf-8") as f:
+            self.card = json.load(f)
         self._preds, self._shapes, self._maps = None, None, {}
 
-    def _load(self, slug):
-        if slug not in self._models:
-            self._models[slug] = joblib.load(os.path.join(MODEL_DIR, "district_%s.pkl" % slug))
-            self._meta[slug] = json.load(open(os.path.join(MODEL_DIR, "district_%s.json" % slug), encoding="utf-8"))
-        return self._models[slug], self._meta[slug]
+    def _crop(self, crop):
+        c = self.card["crops"].get(crop)
+        if c is None:
+            raise ForecastError("No outlook is offered for %s: it was not among the tested crops, or has too little recent history." % crop)
+        return c
+
+    def evidence(self, crop):
+        """How the mean, and the model that was tested against it, did on seasons they had not seen (2018-23 and 2024)."""
+        c = self._crop(crop)
+        return {"crop": crop, "range_from_pooled": c["range_from_pooled"], "mean3": c["mean3"], "model": c["model"],
+                "range_coverage": self.card["criteria"]["B1"]["coverage"]}
 
     def options(self):
-        """state -> district -> the crop/season combinations that can be forecast."""
-        out = {}
+        """Every state and district that has a series on offer, and the crop / season pairs grown widely enough to map."""
+        states, count = {}, {}
         for (dc, crop, season), r in self.series.iterrows():
-            if group_of(crop, season) is None or r["max"] < DATA_END - 3:      # needs a recent record to forecast from
+            if crop not in self.card["crops"] or r["max"] < DATA_END - 3:      # needs a recent record to forecast from
                 continue
             nm = self.names.loc[dc]
-            d = out.setdefault(nm.state_name, {}).setdefault(int(dc), {"name": nm.district_name, "series": []})
+            d = states.setdefault(nm.state_name, {}).setdefault(int(dc), {"name": nm.district_name, "series": []})
             d["series"].append({"crop": crop, "season": season})
-        return out
+            count[(crop, season)] = count.get((crop, season), 0) + 1
+        staple_first = lambda cs: (cs[0] not in ("Rice", "Wheat", "Maize"), cs[0], cs[1])      # the three staples lead every list
+        for st in states.values():
+            for d in st.values():
+                d["series"].sort(key=lambda x: staple_first((x["crop"], x["season"])))
+        pairs = [{"crop": c, "season": s, "districts": n} for (c, s), n in sorted(count.items(), key=lambda kv: staple_first(kv[0])) if n >= MIN_MAP_DISTRICTS]
+        return {"states": states, "crop_seasons": pairs}
+
+    def _rows(self, year, district_codes, crop, season):
+        """History features for the requested series, using only seasons published by `year`."""
+        df = pd.DataFrame({"year": year, "district_code": district_codes, "crop": crop, "season": season})
+        df["state_name"] = self.names.loc[df.district_code, "state_name"].to_numpy()
+        return add_history(df, self.panel, KEY, shift=SHIFT)
 
     def forecast(self, district_code, crop, season, year):
-        slug = group_of(crop, season)
-        if slug is None:
-            raise ForecastError("Forecasts are available for Rice and Maize in Kharif and Wheat in Rabi.")
+        c = self._crop(crop)
         if (district_code, crop, season) not in self.series.index:
             raise ForecastError("No %s (%s) records for this district." % (crop, season))
         if year not in FORECAST_YEARS:
-            raise ForecastError("Forecasts are for %d or %d, the seasons whose yields are not yet published." % FORECAST_YEARS)
-        model, meta = self._load(slug)
+            raise ForecastError("Outlooks are for %d or %d, the seasons whose yields are not yet published." % FORECAST_YEARS)
         nm = self.names.loc[district_code]
-        row = pd.DataFrame([{"year": year, "district_code": district_code, "crop": crop, "season": season,
-                             "state_name": nm.state_name}])
-        row = add_history(row, self.panel, KEY, shift=SHIFT)
+        row = self._rows(year, [district_code], crop, season)
         if int(row["history_seasons"].iloc[0]) == 0:
-            raise ForecastError("No yield recorded in the three published seasons before %d, so there is nothing to forecast from." % year)
-        pred = float(model.predict(row[HIST + CATS])[0])
-        vol = float(_volatility(row).iloc[0])
-        flagged = bool(np.isfinite(vol) and vol >= meta["vol_threshold"])
-        q = meta["q_flagged"] if flagged else meta["q_unflagged"]
+            raise ForecastError("No yield recorded in the three published seasons before %d, so there is nothing to base an outlook on." % year)
         r = row.iloc[0]
+        mean3 = float(r["yield_mean3"])
+        vol = float(_volatility(row).iloc[0])
+        flagged = bool(np.isfinite(vol) and vol >= self.card["vol_threshold"])
+        q = c["q_flagged"] if flagged else c["q_unflagged"]
         lag = next(k for k in (1, 2, 3) if not np.isnan(r["yield_lag%d" % k]))
         hist = self.frame[(self.frame.district_code == district_code) & (self.frame.crop == crop) & (self.frame.season == season)]
         hist = hist.sort_values("year").tail(6)
         notes = []
         if nm.state_name == "Madhya Pradesh":
-            notes.append("Madhya Pradesh district figures in the source are about twice the Centre's official state totals for wheat; "
-                         "treat the level with caution. Changes from year to year are less affected.")
+            notes.append("Madhya Pradesh district figures in the source are about twice the Centre's official state total for wheat and have not "
+                         "been checked for other crops; treat the level with caution. Changes from year to year are less affected.")
         if flagged:
-            notes.append("This series has jumped around recently, so its forecasts have been less reliable and the range is wider.")
+            notes.append("This series has jumped around recently, so the range is wider.")
+        if c["range_from_pooled"]:
+            notes.append("There are too few past seasons of %s to calibrate its own range, so the range is the one measured across all crops." % crop)
         if year == FORECAST_YEARS[1]:
-            notes.append("The most recent published season for this series is older than for a %d forecast; accuracy is lower." % FORECAST_YEARS[0])
+            notes.append("The most recent published season for this series is older than for a %d outlook; accuracy is lower." % FORECAST_YEARS[0])
         return {
             "district": {"code": int(district_code), "name": nm.district_name, "state": nm.state_name},
-            "crop": crop, "season": season, "forecast_year": int(year), "unit": "tonnes/ha",
-            "forecast": round(pred, 2),
-            "interval": {"level": 0.8, "low": round(pred * (1 - q), 2), "high": round(pred * (1 + q), 2),
-                         "relative_half_width": round(q, 3), "method": "conformal, calibrated separately for volatile and stable series"},
-            "baselines": {
-                "last_published": {"value": round(float(r["yield_anchor"]), 2), "year": int(year - (lag + SHIFT))},
-                "mean_last_three_published": round(float(r["yield_mean3"]), 2)},
-            "trust": {"low_trust": flagged, "volatility": None if not np.isfinite(vol) else round(vol, 3),
-                      "seasons_of_history_used": int(r["history_seasons"])},
+            "crop": crop, "season": season, "forecast_year": int(year), "unit": "tonnes/ha", "method": METHOD,
+            "forecast": round(mean3, 2),
+            "interval": {"level": 0.8, "low": round(mean3 * (1 - q), 2), "high": round(mean3 * (1 + q), 2),
+                         "relative_half_width": round(q, 3), "method": "conformal, calibrated per crop and separately for volatile and stable series"},
+            "baselines": {"last_published": {"value": round(float(r["yield_anchor"]), 2), "year": int(year - (lag + SHIFT))},
+                          "mean_last_three_published": round(mean3, 2)},
+            "trust": {"low_trust": flagged, "volatility": None if not np.isfinite(vol) else round(vol, 3), "seasons_of_history_used": int(r["history_seasons"])},
             "history": [{"year": int(y), "yield": round(float(v), 2)} for y, v in zip(hist.year, hist["yield"])],
-            "model": {"group": meta["label"], "trained_through": meta["trained_through"],
-                      "history_lag_seasons": meta["history_lag_seasons"], "skill": meta["skill"],
-                      "inputs": "the series' own published history, crop, season, state and year; no weather or satellite data"},
+            "evidence": self.evidence(crop),
             "notes": notes,
         }
 
@@ -237,48 +241,42 @@ class DistrictForecaster:
         return self._shapes
 
     def map_data(self, crop, season, year):
-        """Every forecastable district for one crop, season and year, in one pass.
+        """Every district with a series for one crop, season and year, in one pass.
 
-        Same rows, same model, same interval rule as `forecast()` (test_district.py checks that a district on the map
-        and the same district on the forecast page agree), computed as one batch because a map needs ~600 at once."""
-        slug = group_of(crop, season)
-        if slug is None:
-            raise ForecastError("Maps are available for Rice and Maize in Kharif and Wheat in Rabi.")
+        Same rows and same range rule as `forecast()` (test_district.py checks that a district on the map and the same
+        district on the forecast page agree), computed as one batch because a map needs ~600 at once."""
+        c = self._crop(crop)
         if year not in FORECAST_YEARS:
-            raise ForecastError("Forecasts are for %d or %d, the seasons whose yields are not yet published." % FORECAST_YEARS)
+            raise ForecastError("Outlooks are for %d or %d, the seasons whose yields are not yet published." % FORECAST_YEARS)
         key = (crop, season, year)
         if key in self._maps:
             return self._maps[key]
-        model, meta = self._load(slug)
         s = self.series.reset_index()
         s = s[(s.crop == crop) & (s.season == season) & (s["max"] >= DATA_END - 3)]
-        df = pd.DataFrame({"year": year, "district_code": s.district_code.to_numpy(), "crop": crop, "season": season})
-        df["state_name"] = self.names.loc[df.district_code, "state_name"].to_numpy()
-        df = add_history(df, self.panel, KEY, shift=SHIFT)
+        df = self._rows(year, s.district_code.to_numpy(), crop, season)
         df = df[df.history_seasons > 0].reset_index(drop=True)
-        pred = model.predict(df[HIST + CATS])
         vol = _volatility(df).to_numpy()
-        flagged = np.isfinite(vol) & (vol >= meta["vol_threshold"])
-        q = np.where(flagged, meta["q_flagged"], meta["q_unflagged"])
+        flagged = np.isfinite(vol) & (vol >= self.card["vol_threshold"])
+        q = np.where(flagged, c["q_flagged"], c["q_unflagged"])
         rows = []
         for i, r in df.iterrows():
-            last = float(r["yield_anchor"])
+            last, mean3 = float(r["yield_anchor"]), float(r["yield_mean3"])
+            sid = self.shape_ids[r.district_code]
             rows.append({
                 "district_code": int(r.district_code), "name": self.names.loc[r.district_code, "district_name"],
-                "state": r.state_name, "shape_id": self.shape_ids[r.district_code],
-                "forecast": round(float(pred[i]), 2), "low": round(float(pred[i] * (1 - q[i])), 2),
-                "high": round(float(pred[i] * (1 + q[i])), 2), "last_published": round(last, 2),
-                "mean3": round(float(r.yield_mean3), 2),
-                "change_vs_last_pct": round(100 * (float(pred[i]) / last - 1), 1) if last > 0 else None,
-                "change_vs_mean3_pct": round(100 * (float(pred[i]) / float(r.yield_mean3) - 1), 1) if r.yield_mean3 > 0 else None,
+                "state": r.state_name, "shape_id": None if pd.isna(sid) else sid,
+                "forecast": round(mean3, 2), "low": round(mean3 * (1 - q[i]), 2), "high": round(mean3 * (1 + q[i]), 2),
+                "last_published": round(last, 2),
+                "change_vs_last_pct": round(100 * (mean3 / last - 1), 1) if last > 0 else None,
                 "low_trust": bool(flagged[i])})
-        out = {"crop": crop, "season": season, "forecast_year": int(year), "unit": "tonnes/ha", "group": meta["label"],
-               "skill": meta["skill"], "districts": rows}
+        out = {"crop": crop, "season": season, "forecast_year": int(year), "unit": "tonnes/ha", "method": METHOD,
+               "evidence": self.evidence(crop), "districts": rows}
         self._maps[key] = out
         return out
 
     def track_record(self, district_code, crop, season):
-        """Out-of-sample forecasts of past seasons (each made by a model trained on earlier years only)."""
+        """Out-of-sample record of the mean: what it said for past seasons, each from seasons published by then, beside what was recorded."""
+        self._crop(crop)
         if self._preds is None:
             self._preds = pd.read_parquet(TRACK_PATH)
         p = self._preds[(self._preds.district_code == district_code) & (self._preds.crop == crop) &
@@ -288,10 +286,10 @@ class DistrictForecaster:
         out = {"seasons": rows}
         if rows:
             a = np.array([[x["forecast"], x["actual"], x["last_published"]] for x in rows])
-            out["summary"] = {"n": len(rows), "model_mae": round(float(np.abs(a[:, 0] - a[:, 1]).mean()), 3),
+            out["summary"] = {"n": len(rows), "mean_mae": round(float(np.abs(a[:, 0] - a[:, 1]).mean()), 3),
                               "last_published_mae": round(float(np.abs(a[:, 2] - a[:, 1]).mean()), 3)}
         return out
 
 
 if __name__ == "__main__":
-    train()
+    build()

@@ -1,0 +1,103 @@
+column,group,dtype,filled_pct
+agri_year,identifier,object,100.0
+year,identifier,int64,100.0
+state_code,identifier,float32,99.9
+state_name,identifier,object,100.0
+district_code,identifier,float32,99.9
+district_name,identifier,object,99.9
+crop,identifier,object,100.0
+season,identifier,object,100.0
+area,yield (value at this row's level),float64,100.0
+production,yield (value at this row's level),float64,98.8
+yield,yield (value at this row's level),float64,97.9
+valid_yield,yield (value at this row's level),bool,100.0
+flag_outlier,yield (value at this row's level),bool,100.0
+source,identifier,object,100.0
+level,identifier,object,100.0
+shape_id,identifier,object,98.9
+lon,identifier,float64,98.9
+lat,identifier,float64,98.9
+geo_match,identifier,object,99.9
+state_area,state-level (original dataset),float32,70.3
+state_production,state-level (original dataset),float32,70.3
+state_fertilizer,state-level (original dataset),float32,70.3
+state_pesticide,state-level (original dataset),float32,70.3
+state_yield,state-level (original dataset),float64,70.3
+state_temp_c,state-level (original dataset),float32,73.7
+state_rainfall_mm,state-level (original dataset),float32,73.7
+state_humidity_pct,state-level (original dataset),float32,73.7
+state_soil_N,state-level (original dataset),float32,93.9
+state_soil_P,state-level (original dataset),float32,93.9
+state_soil_K,state-level (original dataset),float32,93.9
+state_soil_pH,state-level (original dataset),float32,93.9
+wx_rain_sum,"weather, fixed season window",float32,97.7
+wx_rain_days,"weather, fixed season window",float32,97.7
+wx_rain_first30,"weather, fixed season window",float32,97.7
+wx_rain_pre60,"weather, fixed season window",float32,97.7
+wx_dry_spell_max,"weather, fixed season window",float32,97.7
+wx_tmax_mean,"weather, fixed season window",float32,97.5
+wx_tmin_mean,"weather, fixed season window",float32,97.5
+wx_hot_days,"weather, fixed season window",float32,97.5
+wx_rh_mean,"weather, fixed season window",float32,97.7
+wx_sw_mean,"weather, fixed season window",float32,97.7
+cal_rain_sum,"weather, planting-to-harvest window",float32,10.2
+cal_rain_days,"weather, planting-to-harvest window",float32,10.2
+cal_rain_first30,"weather, planting-to-harvest window",float32,10.2
+cal_rain_pre60,"weather, planting-to-harvest window",float32,10.2
+cal_dry_spell_max,"weather, planting-to-harvest window",float32,10.2
+cal_tmax_mean,"weather, planting-to-harvest window",float32,10.2
+cal_tmin_mean,"weather, planting-to-harvest window",float32,10.2
+cal_hot_days,"weather, planting-to-harvest window",float32,10.2
+cal_rh_mean,"weather, planting-to-harvest window",float32,10.2
+cal_sw_mean,"weather, planting-to-harvest window",float32,10.2
+cal_tmax_last30,"weather, planting-to-harvest window",float32,10.2
+cal_hot_last30,"weather, planting-to-harvest window",float32,10.2
+ndvi60_max,satellite NDVI/EVI,float32,55.5
+ndvi60_mean,satellite NDVI/EVI,float32,55.5
+ndvi60_int,satellite NDVI/EVI,float32,55.5
+ndvi60_evi_max,satellite NDVI/EVI,float32,55.5
+ndvi60_evi_mean,satellite NDVI/EVI,float32,55.5
+ndvi90_max,satellite NDVI/EVI,float32,55.5
+ndvi90_mean,satellite NDVI/EVI,float32,55.5
+ndvi90_int,satellite NDVI/EVI,float32,55.5
+ndvi90_evi_max,satellite NDVI/EVI,float32,55.5
+ndvi90_evi_mean,satellite NDVI/EVI,float32,55.5
+ndvi120_max,satellite NDVI/EVI,float32,55.5
+ndvi120_mean,satellite NDVI/EVI,float32,55.5
+ndvi120_int,satellite NDVI/EVI,float32,55.5
+ndvi120_evi_max,satellite NDVI/EVI,float32,55.5
+ndvi120_evi_mean,satellite NDVI/EVI,float32,55.5
+ndvifull_max,satellite NDVI/EVI,float32,55.5
+ndvifull_mean,satellite NDVI/EVI,float32,55.5
+ndvifull_int,satellite NDVI/EVI,float32,55.5
+ndvifull_evi_max,satellite NDVI/EVI,float32,55.5
+ndvifull_evi_mean,satellite NDVI/EVI,float32,55.5
+soil_n_low,soil (Soil Health Card),float32,97.4
+soil_n_high,soil (Soil Health Card),float32,97.4
+soil_n_idx,soil (Soil Health Card),float32,97.4
+soil_samples,soil (Soil Health Card),float32,97.4
+soil_p_low,soil (Soil Health Card),float32,98.9
+soil_p_high,soil (Soil Health Card),float32,98.9
+soil_p_idx,soil (Soil Health Card),float32,98.9
+soil_k_low,soil (Soil Health Card),float32,98.9
+soil_k_high,soil (Soil Health Card),float32,98.9
+soil_k_idx,soil (Soil Health Card),float32,98.9
+soil_oc_low,soil (Soil Health Card),float32,98.8
+soil_oc_high,soil (Soil Health Card),float32,98.8
+soil_oc_idx,soil (Soil Health Card),float32,98.8
+soil_ph_acidic,soil (Soil Health Card),float32,99.0
+soil_ph_alkaline,soil (Soil Health Card),float32,99.0
+soil_ec_saline,soil (Soil Health Card),float32,98.8
+soil_b_deficient,soil (Soil Health Card),float32,96.8
+soil_cu_deficient,soil (Soil Health Card),float32,97.9
+soil_fe_deficient,soil (Soil Health Card),float32,98.0
+soil_mn_deficient,soil (Soil Health Card),float32,97.8
+soil_s_deficient,soil (Soil Health Card),float32,98.4
+soil_zn_deficient,soil (Soil Health Card),float32,98.3
+icr_match,ICRISAT attributes,object,99.9
+icr_dist_km,ICRISAT attributes,float32,46.7
+irr_net_share,ICRISAT attributes,float32,80.0
+irr_well_share,ICRISAT attributes,float32,82.0
+irr_canal_share,ICRISAT attributes,float32,78.5
+cropping_intensity,ICRISAT attributes,float32,88.4
+fert_npk_per_ha,ICRISAT attributes,float32,88.4

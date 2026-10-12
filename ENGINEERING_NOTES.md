@@ -665,6 +665,8 @@ All three commands should be run after any change to the dataset or the model.
 
 ## 15. Phase 0 correction (v3.1)
 
+> Superseded by §17: the state-level model described here is retired.
+
 `PRODUCTION_ROADMAP.md` §1 measured that the shipped v3 model lost to trivial baselines.
 This section records what was changed in response, and what the changes found.
 
@@ -765,6 +767,8 @@ frontend pages that read them. Removed: `Procfile`, `railway.json`.
 
 ## 16. District forecast service (Phase 4, first slice)
 
+> Superseded by §17: the models and the skill figures below came from a test that was too generous (see §17.2); the service now serves the 3-season mean.
+
 The research behind it is in `PRODUCTION_ROADMAP.md` (Phase 1 criteria C1–C5, Phase 2, Gate G1) and `data/DATA_CARD.md`.
 This section is only about what is served and how to run and deploy it.
 
@@ -827,10 +831,98 @@ first call, map 0.63 s, shapes 0.25 s); 422s and the CORS allow/refuse behaviour
 was 492 MiB after all models were loaded; with the 5 MB ones it is **213 MiB** (image 949 MB), comfortably inside the live
 service's 1 GiB.
 
+**Deployed 2026-10-12** by pushing commit `f6dc55e` to `main` (GitHub auto-deploys Cloud Run and Vercel). Cloud Build succeeded and
+revision `agripredict-api-00014-5bc` took 100% of traffic. Checked live afterwards: every endpoint answered (state predict 0.9 s,
+district options 1.7 s cold, map 1.1–2.0 s, shapes 1.7 s; the same Ludhiana wheat 2025 forecast, 4.91 (4.11–5.70), as the local
+container), the 422s, CORS allowed for the Vercel origin and refused for another, `node frontend/check-constants.mjs` OK against the
+live API, and the Vercel site's Dashboard, District Forecast (2.25 t/ha for the default series), District Map (669 districts, 815
+outlines) and Model Performance pages rendered without console errors. The service has `CORS_ORIGINS` set to the production Vercel
+domain only (no trailing slash; Vercel preview URLs are not allowed). A first deploy attempt used the placeholder
+`https://TUMHARA-APP.vercel.app` from a copied command (revision 00012); it was corrected to the real origin (00013) before the push.
+Rollback: route traffic to the previous revision with `gcloud run services update-traffic`, and promote the previous Vercel deployment.
+
 ### 16.4 Limits worth knowing
+
+- **Dashboard and Prediction still describe the older state-level model** (19,689 records, 1997–2020, skill −9.6% against last
+  season). The district data (441,075 official records, 752 districts, 1997–2024) powers only District Forecast and District Map.
+  After the first deploy this was easy to miss, since the larger dataset was nowhere on screen, so `/api/stats` now returns a
+  `district` block (read from `serving/dataset_stats.json`, written by `python district_forecast.py` or `python district_forecast.py stats`),
+  and the Dashboard shows two labelled KPI rows, a note saying which model each describes, and the About page has a district section.
 
 - The deployed frontend still needs `CORS_ORIGINS` set (§15.5); the new page calls the same API.
 - Forecasts for 2025 cannot be checked yet: its yields are unpublished. The track record shows only past, out-of-sample seasons.
 - Only 706 of 752 districts have a boundary, and the model was validated on those; the others are not offered.
 - The map's "change vs last published" mostly shows a recent unusual season bouncing back, which the page says; for Kharif Rice + Maize the model is about as good as the 3-season mean, so the map should not be read as more than that. Outlines are simplified for drawing, not for area.
 - Weekly refresh, "change since last update", alerts and a keyed B2B endpoint are not built.
+
+
+## 17. One dataset, one dashboard, an honest outlook (2026-10-12)
+
+The state-level service (§15) and the district service (§16) were two apps on two datasets. This section replaces both. The evidence
+is in `PRODUCTION_ROADMAP.md` ("One table, one model", Amendments A1 and A2) and `data/DATA_CARD.md` (the master dataset); this is only
+what was built and how to run it.
+
+### 17.1 What changed
+
+- **One table.** `pipeline/build_master_dataset.py` joins every source onto the district panel (441,437 rows × 102 columns); the original
+  state-level CSV is the sum of the district data (93.4% of keys agree within 2%), so its values ride on district rows as `state_*`.
+- **One set of views.** `pipeline/export_serving.py` derives what the service needs from it (`serving/state_view.parquet`,
+  `crop_summary.json`, `soil_climate.json`, `dataset_stats.json`; 0.5 MB). Every number on the Dashboard, Trends, Crop Insights and Soil &
+  Climate pages comes from these, so the pages cannot disagree. Trend and state comparisons use district rows only: the 362 state-only
+  rows (Delhi and a few others) include values that are not credible.
+- **One method.** `pipeline/train_master.py` trains and tests on the master table; `district_forecast.py build()` writes the serving files.
+  The result: no model beat the 3-season mean by the pre-registered bar once the test respected the publication lag, so the service
+  serves **the mean of the last three published seasons with a tested 80% range** (63 crops, 38,429 series, 751 districts, 2025 and 2026).
+- **Retired.** The v3 state-level model, `/api/predict`, `/api/state-climate`, `/api/research`, `/api/model-metrics`, the Prediction page, the
+  Dashboard's input form, `features.py` at serving time, and the old `serving/models/*.pkl`. The files remain in git history and
+  the legacy scripts (`train_v3.py`, `test_model.py`, `master_dataset_*.csv`) are still in the repository; none is read by the service. Delete them
+  when you are sure nothing else needs them.
+
+### 17.2 A correction worth remembering
+
+Phase 2, Gate G1 and the model-size experiment trained each test year *Y* on rows through *Y*−1. With a one-season publication lag the
+yields of *Y*−1 are unknown when a *Y* forecast is made, and the model carries *Y*−1's shocks into *Y* through `year`, `state` and `crop`.
+Training through *Y*−2 instead cut the staple groups' skill against the 3-season mean from +2.2% / +8.3% to +1.4% / +4.0% and turned 2024
+negative. The deployed District Forecast page (revision `agripredict-api-00014-5bc`) quotes the earlier figures. Any future backtest must train
+on `year <= Y - 2` (`train_master.LAG`).
+
+### 17.3 Files
+
+| File | Role |
+|---|---|
+| `pipeline/build_master_dataset.py` | the master table, its column catalogue and the state/district reconciliation |
+| `pipeline/export_serving.py` | the small views the service reads |
+| `pipeline/train_master.py` | M1–M4 and B1 (lag-consistent rolling origin 2016–2024); `python pipeline/train_master.py score` recomputes every result from the saved forecasts without refitting |
+| `district_forecast.py` | `python district_forecast.py` writes `serving/outlook.json`, `district_series.parquet`, `track_record.parquet`; `DistrictForecaster` serves |
+| `forecasting.py` | `add_history` (publication-lag aware lags) and the relative design shared by training and serving |
+| `api.py` | `/api/{options,stats,model,trends,historical,crop-insights,soil-climate}` and `/api/district/{options,forecast,map,shapes,track-record}`; GET only |
+| `test_api.py`, `test_district.py` | 10 + 12 checks, including that a 2025 outlook ignores 2024 and uses 2023 and that the expected yield equals the mean of what was published |
+| `frontend/src/components/Dashboard.jsx`, `pages/*` | Dashboard, District Outlook, District Map, Historical Trends, Crop Insights, Soil & Climate, Model & Evidence |
+
+### 17.4 Rebuilding
+
+```bash
+python pipeline/build_master_dataset.py     # the master table (needs the pipeline outputs in data/processed)
+python pipeline/export_serving.py           # views for the service
+python pipeline/train_master.py             # the evaluation (about an hour; `score` re-reads saved forecasts)
+python district_forecast.py                 # serving/outlook.json, series, track record
+python test_api.py && python test_district.py
+```
+
+`frontend/src/constants.js` seeds the first paint from `/api/options` and `/api/stats`; `node frontend/check-constants.mjs` fails when the seed drifts
+(run it against the live API after a deploy).
+
+### 17.5 Deploying
+
+`serving/` is tracked (6.5 MB); `serving/models/` is gone, so the first commit deletes the old pickles. The service reads only `api.py`, `forecasting.py`,
+`district_forecast.py` and `serving/` (`.dockerignore` and `deploy/stage_build.py` say the same). **The API and the frontend changed together and are not
+compatible with the previous versions**, so expect a short window between the Cloud Run and Vercel deploys in which one side fails; roll back with the
+previous Cloud Run revision (`agripredict-api-00014-5bc`) and the previous Vercel deployment. `CORS_ORIGINS` is unchanged. Nothing here has been
+deployed or tested on Cloud Run yet.
+
+### 17.6 Limits
+
+- 2024 yields are published for about 28 states, so the 2024 column of every test is a rough check.
+- The ranges are wide for volatile crops, and only about 80% by construction.
+- Madhya Pradesh district figures are about twice the Centre's official wheat total; the service says so on every MP outlook.
+- Weather, satellite, soil, irrigation and any model are not used. Reasons and the untried alternatives are in the roadmap's results block.

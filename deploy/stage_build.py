@@ -7,11 +7,11 @@ Then, from that folder:   docker build -t agripredict-api .      or      gcloud 
 
 Why a manifest and not .dockerignore / .gcloudignore:
   * a local check of what a deploy contains, before pushing (the GitHub-triggered build uses the same files, all
-    tracked in git: `serving/` holds the district models and data, 6.5 MB);
+    tracked in git: `serving/` holds the models and the small views of the dataset);
   * on this machine the checkout sits in OneDrive, where many files are cloud placeholders that Docker's build
     context refuses to read ("invalid file request"). Copying with shutil reads them, which also hydrates them;
   * the list below is the one place that says what is deployed.
-Everything else (raw data, weather, notebooks, the frontend, the v2 model) stays out of the image.
+Everything else (the master table, raw data, notebooks, the frontend, the retired state-level model) stays out of the image.
 """
 
 import os
@@ -20,15 +20,9 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-MANIFEST = [
-    "Dockerfile", "requirements.txt",
-    "api.py", "features.py", "forecasting.py", "district_forecast.py",
-    "model_metrics.json", "crop_yield_model_v3.pkl", "master_dataset_enhanced.csv", "master_dataset_cleaned.csv",
-    "extra/baseline_comparison.csv", "extra/ablation_study_results.csv", "extra/stage3_model_comparison_results.csv",
-    "serving/models/district_kharif_rice_maize.pkl", "serving/models/district_kharif_rice_maize.json",
-    "serving/models/district_wheat_rabi.pkl", "serving/models/district_wheat_rabi.json",
-    "serving/district_series.parquet", "serving/track_record.parquet", "serving/district_shapes.json",
-]
+CODE = ["Dockerfile", "requirements.txt", "api.py", "forecasting.py", "district_forecast.py"]
+MANIFEST = CODE + sorted(os.path.relpath(os.path.join(dp, f), ROOT).replace(os.sep, "/")
+                         for dp, _, fs in os.walk(os.path.join(ROOT, "serving")) for f in fs)    # all of serving/
 
 
 def stage(dest):
@@ -52,7 +46,7 @@ def stage(dest):
 
 def smoke(dest):
     """The API must import from the staged folder alone, with nothing else from the repository on the path."""
-    code = "import sys; sys.path.insert(0, '.'); import api; print('import ok:', len(api.state_options), 'states,', len(api.crop_options), 'crops')"
+    code = "import sys; sys.path.insert(0, '.'); import api; print('import ok:', len(api.STATES), 'states,', len(api.CROP_LIST), 'crops')"
     r = subprocess.run([sys.executable, "-I", "-c", code], cwd=dest, capture_output=True, text=True)
     print(r.stdout.strip() or r.stderr.strip()[-600:])
     if r.returncode:

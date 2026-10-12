@@ -2,7 +2,6 @@ import { useState, useEffect } from 'react'
 import './index.css'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
-import Prediction from './pages/Prediction'
 import DistrictForecast from './pages/DistrictForecast'
 import DistrictMap from './pages/DistrictMap'
 import HistoricalTrends from './pages/HistoricalTrends'
@@ -26,7 +25,7 @@ function App() {
 
     fetch(`${API_BASE}/api/stats`)
       .then(r => r.json())
-      .then(d => { if (d?.total_records) setStats(d) })
+      .then(d => { if (d?.dataset) setStats(d) })
       .catch(e => console.error('Failed to load stats:', e))
   }, [])
 
@@ -34,6 +33,9 @@ function App() {
     setActivePage(page)
     setSidebarOpen(false)
   }
+
+  const d = stats?.dataset
+  const o = stats?.outlook
 
   return (
     <div className="app-layout">
@@ -65,14 +67,11 @@ function App() {
         </div>
 
         {/* Pages */}
-        {activePage === 'dashboard' && (
-          <Dashboard options={options} stats={stats} />
-        )}
+        {activePage === 'dashboard' && <Dashboard stats={stats} onNavigate={handlePageChange} />}
         {activePage === 'district' && <DistrictForecast key={districtPick ? JSON.stringify(districtPick) : 'free'} initial={districtPick} />}
         {activePage === 'map' && (
           <DistrictMap onOpen={pick => { setDistrictPick(pick); setActivePage('district') }} />
         )}
-        {activePage === 'prediction' && <Prediction options={options} />}
         {activePage === 'trends' && <HistoricalTrends options={options} />}
         {activePage === 'insights' && <CropInsights options={options} />}
         {activePage === 'soil' && <SoilClimate options={options} />}
@@ -86,7 +85,7 @@ function App() {
                   <div>
                     <h1 className="page-header-title">About AgriPredict AI</h1>
                     <div className="page-header-subtitle">
-                      Machine learning powered crop yield forecasting
+                      Crop yield forecasting from official records
                     </div>
                   </div>
                 </div>
@@ -95,53 +94,43 @@ function App() {
                 <div className="section-title">🌾 About the Project</div>
                 <div style={{ color: '#4a5d4e', lineHeight: 1.8, fontSize: '0.92rem' }}>
                   <p>
-                    AgriPredict AI is a machine-learning powered crop yield forecasting system trained on
-                    24 years (1997–2020) of Indian agricultural data. It combines soil chemistry, weather
-                    patterns, and farming inputs to estimate expected harvests.
+                    AgriPredict AI tells you what to expect from a crop in an Indian district next season, from that district's
+                    own published history, and how far to trust it. It is built on one dataset: {d ? `${d.rows.toLocaleString('en-IN')} records for ${d.districts} districts in ${d.states_uts} states and UTs, ${d.year_min}–${d.year_max}` : 'official district records'},
+                    with the state-level figures, weather, satellite vegetation, soil and irrigation data joined onto the same rows.
                   </p>
-                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Model Details</h3>
+                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>What is forecast, and how</h3>
                   <ul style={{ paddingLeft: '1.2rem' }}>
-                    <li><strong>Algorithm:</strong> Extra Trees Regressor (200 estimators, max depth 20)</li>
-                    <li><strong>Mean Absolute Error:</strong> {stats?.model_mae ?? '—'} t/ha, against{' '}
-                      {stats?.baseline_mae ?? '—'} t/ha for the strongest naive baseline
-                      ({stats?.baseline_name?.toLowerCase() || '—'})</li>
-                    <li><strong>Skill vs that baseline:</strong>{' '}
-                      {stats?.skill_vs_baseline_pct == null ? '—'
-                        : `${stats.skill_vs_baseline_pct > 0 ? '+' : ''}${stats.skill_vs_baseline_pct}%`}</li>
-                    <li><strong>Training records:</strong> {stats?.total_records?.toLocaleString('en-IN') || '—'}</li>
-                    <li><strong>Coverage:</strong> {stats?.crops_covered || '—'} crops · {stats?.states_covered || '—'} states</li>
-                    <li><strong>Validation:</strong> temporal holdout — trained on 1997–2017, tested on 2018–2020, one season ahead</li>
+                    <li><strong>Expected yield:</strong> the mean of the last three published seasons of the series. It has been a better guide than repeating
+                      the last published season for {o ? `${o.mean_beats_last_published_crops} of ${o.crops_offered}` : 'most'} crops.</li>
+                    <li><strong>Range:</strong> 80%, calibrated per crop on how far that mean was from the recorded yield in past seasons, wider for volatile
+                      series. It held {o ? `${Math.round(100 * o.range_coverage.dev_2018_2023)}% of the time on 2018–23 and ${Math.round(100 * o.range_coverage.confirm_2024)}% in 2024` : '—'}.</li>
+                    <li><strong>A model was tested and is not used:</strong> a machine-learning model trained on the whole dataset was tested the way a
+                      forecaster would meet the data, knowing only what had been published by then. {o ? `It beat the mean by the bar set in advance for ${o.model_crops_beating_mean} of the ${o.model_crops_tested} crops` : 'It did not clear the bar'}.
+                      Weather, satellite and soil data did not clear their bars either.</li>
+                    <li><strong>Validation:</strong> every pass/fail bar was written before the results were seen; the <strong>Model &amp; Evidence</strong> page
+                      lists them with the outcome, including the ones that failed and one test that was corrected because it was too generous.</li>
                   </ul>
-                  <p style={{ marginTop: '0.8rem' }}>
-                    Every forecast is anchored on the same state, crop and season's recorded yield in
-                    earlier years, so it needs at least one recorded season in the three years
-                    before. Accuracy is quoted as a skill score against simple baselines, such as
-                    repeating last season's yield, because a high R² alone does not show a model adds
-                    anything. A negative skill means the baseline is currently better. The{' '}
-                    <strong>Model Performance</strong> page sets out the full comparison.
+                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Publication lag</h3>
+                  <p>
+                    District yields are published more than a year late, so a forecast for 2025 uses seasons up to 2023 and never assumes it knows
+                    last season's result. Each forecast is shown with an 80% range, the last published value, the 3-season mean and a reliability flag.
                   </p>
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Units and exclusions</h3>
                   <p>
-                    Yields are reported in tonnes per hectare. Coconut is excluded from the model:
-                    Indian government records count individual nuts rather than weight, so its
-                    figures are not comparable with every other crop in the same column.
+                    Yields are in tonnes per hectare. Coconut is recorded in nuts, so it is never averaged with the others. Madhya Pradesh district
+                    figures in the source are about twice the Centre's official state total for wheat; treat their level with caution.
                   </p>
                   <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>Scope of a forecast</h3>
                   <p>
-                    Soil is recorded once per state and weather once per state-year, so a forecast
-                    describes conditions typical of a region rather than one specific field. Use it
-                    to compare options — crops, seasons, input levels — rather than as a substitute
-                    for a soil test. Predictions are statistical estimates and should be one input
-                    among several in farm planning.
+                    An outlook describes a district, not a field, and is a statistical estimate. Use it to compare districts, crops and seasons, as one
+                    input among several in planning.
                   </p>
-                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>How to Use</h3>
+                  <h3 style={{ margin: '1.2rem 0 0.5rem', color: '#1a2e1e' }}>How to use</h3>
                   <ol style={{ paddingLeft: '1.2rem' }}>
-                    <li>Enter your field's location, soil, climate, and farm inputs on the <strong>Dashboard</strong></li>
-                    <li>Click <strong>Predict Yield</strong> to get the forecast</li>
-                    <li>Compare the forecast with last season's recorded yield, shown beside it</li>
-                    <li>Use <strong>Prediction</strong> to compare several input scenarios side by side</li>
-                    <li>Check <strong>Historical Trends</strong> to see how yields have evolved</li>
-                    <li>Read <strong>Model Performance</strong> for accuracy, limits and validation</li>
+                    <li>Start on the <strong>Dashboard</strong> for what the data holds and what it supports forecasting</li>
+                    <li>Open <strong>District Outlook</strong> or the <strong>District Map</strong> for the expected yield, with its range, baselines and track record</li>
+                    <li>Use <strong>Historical Trends</strong>, <strong>Crop Insights</strong> and <strong>Soil &amp; Climate</strong> to see the records behind it</li>
+                    <li>Read <strong>Model &amp; Evidence</strong> for accuracy by crop, limits and validation</li>
                   </ol>
                 </div>
               </div>

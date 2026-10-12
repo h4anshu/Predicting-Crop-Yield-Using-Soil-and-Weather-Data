@@ -1,96 +1,97 @@
-import { useState, useMemo } from 'react'
+import { useState } from 'react'
 import {
   LineChart, Line, BarChart, Bar as RBar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Legend, ScatterChart, Scatter, ZAxis,
+  Tooltip, ResponsiveContainer, ScatterChart, Scatter, ZAxis, Cell,
 } from 'recharts'
 import { Bar, ErrorState, KpiCard, Loading, Note, PageHeader, Page, Spec } from './shared'
 import { useApi, CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt } from './api'
 
 /**
- * The agronomic inputs behind every prediction.
+ * The soil and weather records behind the dataset, by state.
  *
- * This page is also where the dataset's granularity limit is stated plainly: soil is
- * one profile per state and weather one observation per state-year, which is exactly
- * why the model resolves regional rather than field-level conditions. Burying that
- * would leave a reader to discover it themselves and distrust the rest.
+ * Soil is the Soil Health Card programme's own lab results (the share of tested samples rated low or high), not an assumed
+ * constant; weather is IMD gridded rainfall and temperature over the Kharif and Rabi windows. Both are district-level data
+ * summarised to a state here, and the page states plainly what they can and cannot say.
  */
+const NUTRIENTS = [
+  { key: 'n', label: 'Nitrogen (N)', hint: 'Share of samples rated low. Drives vegetative growth.' },
+  { key: 'p', label: 'Phosphorus (P)', hint: 'Share of samples rated low. Root development and grain fill.' },
+  { key: 'k', label: 'Potassium (K)', hint: 'Share of samples rated low. Water regulation and stress tolerance.' },
+  { key: 'oc', label: 'Organic carbon', hint: 'Share of samples rated low. A proxy for soil health.' },
+]
+const MICRO = [
+  { key: 'zn_deficient', label: 'Zinc' }, { key: 'fe_deficient', label: 'Iron' },
+  { key: 'b_deficient', label: 'Boron' }, { key: 's_deficient', label: 'Sulphur' },
+]
+const METRICS = {
+  kharif_rain: { label: 'Kharif rainfall', unit: 'mm', color: CHART_COLORS.blue },
+  rabi_rain: { label: 'Rabi rainfall', unit: 'mm', color: CHART_COLORS.teal },
+  kharif_tmax: { label: 'Kharif max temperature', unit: '°C', color: CHART_COLORS.red },
+  rabi_tmin: { label: 'Rabi min temperature', unit: '°C', color: CHART_COLORS.purple },
+}
+const pct = v => (v == null ? '—' : `${fmt(100 * v, 0)}%`)
+const mean = a => { const v = (a || []).filter(x => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null }
+
 export default function SoilClimate({ options }) {
   const { data, error, loading } = useApi('/api/soil-climate')
   const [state, setState] = useState('Punjab')
-  const [metric, setMetric] = useState('total_rainfall_mm')
-
-  const soilByState = useMemo(() => {
-    const map = {}
-    ;(data?.soil || []).forEach(s => { map[s.state.trim()] = s })
-    return map
-  }, [data])
+  const [metric, setMetric] = useState('kharif_rain')
+  const [nutrient, setNutrient] = useState('n')
 
   if (loading) return <Page><Loading label="Loading soil and climate data…" /></Page>
   if (error) return <Page><ErrorState error={error} /></Page>
   if (!data) return null
 
-  const soil = soilByState[state]
-  const w = data.weather[state] || data.weather[Object.keys(data.weather)[0]] || {}
-  const series = (w.years || []).map((y, i) => ({
-    year: y,
-    total_rainfall_mm: w.rainfall[i],
-    avg_temp_c: w.temp[i],
-    avg_humidity_percent: w.humidity[i],
-  }))
-
-  const allSoil = (data.soil || []).map(s => ({ ...s, state: s.state.trim() }))
-  const npkRanked = [...allSoil].sort((a, b) => (b.N + b.P + b.K) - (a.N + a.P + a.K))
-  const avgRain = series.length ? series.reduce((a, b) => a + b.total_rainfall_mm, 0) / series.length : 0
-  const avgTemp = series.length ? series.reduce((a, b) => a + b.avg_temp_c, 0) / series.length : 0
-
-  const phBand = soil ? (soil.pH < 6.0 ? 'Acidic' : soil.pH > 7.5 ? 'Alkaline' : 'Optimal') : '—'
-  const phTone = phBand === 'Optimal' ? 'var(--green-600)' : 'var(--amber)'
+  const soil = data.soil[state]
+  const w = data.weather[state]
+  const series = (w?.years || []).map((y, i) => ({ year: y, value: w[metric]?.[i] ?? null }))
+  const ranked = Object.entries(data.soil)
+    .map(([st, s]) => ({ state: st, value: s[`${nutrient}_low`] }))
+    .filter(r => r.value != null).sort((a, b) => b.value - a.value)
+  const scatter = (isSelected) => Object.entries(data.weather).flatMap(([st, v]) =>
+    (st === state) !== isSelected ? [] : v.years.map((y, i) => ({ rain: v.kharif_rain?.[i], temp: v.kharif_tmax?.[i], state: st, year: y }))
+      .filter(r => r.rain != null && r.temp != null))
+  const m = METRICS[metric]
+  const states = (options?.states || Object.keys(data.weather)).filter(s => data.soil[s] || data.weather[s])
 
   return (
     <Page>
       <PageHeader
         icon="🧪"
         title="Soil & Climate"
-        subtitle="The agronomic conditions the model reads for each region"
+        subtitle="The soil test results and weather recorded for each region"
         right={
           <div className="form-field" style={{ minWidth: 200 }}>
             <label>State</label>
             <select value={state} onChange={e => setState(e.target.value)}>
-              {(options?.states || Object.keys(data.weather)).map(s => (
-                <option key={s} value={s}>{s}</option>
-              ))}
+              {states.map(s => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
         }
       />
 
       <div className="kpi-row fade-in">
-        <KpiCard icon="🧪" iconBg="var(--green-100)" label="SOIL NPK"
-          value={soil ? `${soil.N}·${soil.P}·${soil.K}` : '—'} sub="N · P · K (kg/ha)" />
-        <KpiCard icon="⚗️" iconBg="var(--amber-bg)" label="SOIL pH"
-          value={soil ? fmt(soil.pH, 1) : '—'} sub={phBand} />
-        <KpiCard icon="🌧️" iconBg="var(--blue-bg)" label="AVG RAINFALL"
-          value={fmt(avgRain, 0)} sub="mm/year, 1997–2020" />
-        <KpiCard icon="🌡️" iconBg="var(--red-bg)" label="AVG TEMPERATURE"
-          value={`${fmt(avgTemp, 1)}°C`} sub="1997–2020" />
+        <KpiCard icon="🧫" iconBg="var(--green-100)" label="SOIL SAMPLES TESTED"
+          value={soil ? soil.samples.toLocaleString('en-IN') : '—'} sub={soil ? `${soil.districts} districts, 2023–25` : 'no Soil Health Card data'} />
+        <KpiCard icon="🌱" iconBg="var(--amber-bg)" label="LOW IN NITROGEN" value={pct(soil?.n_low)} sub="of tested samples" />
+        <KpiCard icon="⚗️" iconBg="var(--blue-bg)" label="ACIDIC · ALKALINE" value={soil ? `${pct(soil.ph_acidic)} · ${pct(soil.ph_alkaline)}` : '—'} sub="of tested samples" />
+        <KpiCard icon="🌧️" iconBg="var(--purple-bg)" label="AVG KHARIF RAINFALL"
+          value={w ? `${fmt(mean(w.kharif_rain), 0)} mm` : '—'} sub={w ? `${w.years[0]}–${w.years[w.years.length - 1]}, window Jun–Oct` : 'no weather'} />
       </div>
 
-      {/* ─── The caveat, stated up front ────────────────────────────── */}
       <div className="section-card fade-in">
         <div className="section-title">📐 How precise is this data?</div>
-        <Note tone="warn" title="Regional resolution, not field resolution">
+        <Note tone="warn" title="District records, summarised to a state">
           {data.granularity.implication}
           <div className="spec-grid" style={{ marginTop: '0.8rem' }}>
             <Spec label="Soil" value={data.granularity.soil} wide />
             <Spec label="Weather" value={data.granularity.weather} wide />
           </div>
         </Note>
-        <Note tone="info" title="What that means in practice">
-          Forecasts respond to the conditions typical of a region, not to a soil test from one
-          field. Adjusting the soil inputs on the Dashboard explores how a field differing from its
-          regional baseline might perform — useful for comparison, but not a substitute for
-          field-level agronomy. Closing this gap needs district-level soil and weather records,
-          which is a data-collection problem rather than a modelling one.
+        <Note tone="info" title="What they are used for">
+          Weather and soil are in the dataset for every district, but the forecasting model does not use them: with the real publication lag
+          they improved its error by less than 2%, below the bar set in advance (see the Model page). They describe the regions behind
+          the yields; they do not drive the forecast.
         </Note>
       </div>
 
@@ -98,30 +99,27 @@ export default function SoilClimate({ options }) {
         <div className="section-title">
           🌦️ Climate history — {state}
           <div className="seg-control">
-            <button className={metric === 'total_rainfall_mm' ? 'active' : ''}
-                    onClick={() => setMetric('total_rainfall_mm')}>Rainfall</button>
-            <button className={metric === 'avg_temp_c' ? 'active' : ''}
-                    onClick={() => setMetric('avg_temp_c')}>Temperature</button>
-            <button className={metric === 'avg_humidity_percent' ? 'active' : ''}
-                    onClick={() => setMetric('avg_humidity_percent')}>Humidity</button>
+            {Object.entries(METRICS).map(([k, v]) => (
+              <button key={k} className={metric === k ? 'active' : ''} onClick={() => setMetric(k)}>{v.label}</button>
+            ))}
           </div>
         </div>
-        <div style={{ width: '100%', height: 300 }}>
-          <ResponsiveContainer>
-            <LineChart data={series} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
-              <CartesianGrid {...gridProps} />
-              <XAxis dataKey="year" {...axisProps} />
-              <YAxis {...axisProps} domain={['auto', 'auto']}
-                     label={{ value: METRIC_UNITS[metric], angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: '#485c4e' } }} />
-              <Tooltip {...tooltipStyle}
-                       formatter={v => [`${fmt(v, 1)} ${METRIC_UNITS[metric]}`, METRIC_LABELS[metric]]} />
-              <Line type="monotone" dataKey={metric} stroke={METRIC_COLORS[metric]}
-                    strokeWidth={2.5} dot={{ r: 2.5 }} name={METRIC_LABELS[metric]} />
-            </LineChart>
-          </ResponsiveContainer>
-        </div>
+        {series.some(r => r.value != null) ? (
+          <div style={{ width: '100%', height: 300 }}>
+            <ResponsiveContainer>
+              <LineChart data={series} margin={{ top: 8, right: 16, left: 0, bottom: 4 }}>
+                <CartesianGrid {...gridProps} />
+                <XAxis dataKey="year" {...axisProps} />
+                <YAxis {...axisProps} domain={['auto', 'auto']}
+                       label={{ value: m.unit, angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: '#485c4e' } }} />
+                <Tooltip {...tooltipStyle} formatter={v => [`${fmt(v, 1)} ${m.unit}`, m.label]} />
+                <Line type="monotone" dataKey="value" stroke={m.color} strokeWidth={2.5} dot={{ r: 2.5 }} name={m.label} connectNulls />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        ) : <Note tone="info">No weather is recorded for {state}.</Note>}
         <div className="chart-summary">
-          {series.length} yearly observations for {state}, 1997–2020.
+          {series.length} yearly values for {state}; each is the mean over its districts of the Kharif (Jun–Oct) or Rabi (Nov–mid-Apr) window.
         </div>
       </div>
 
@@ -131,41 +129,44 @@ export default function SoilClimate({ options }) {
           {soil ? (
             <>
               <div className="nutrient-list">
-                <Nutrient label="Nitrogen (N)" value={soil.N} max={160} unit="kg/ha"
-                          hint="Drives vegetative growth." />
-                <Nutrient label="Phosphorus (P)" value={soil.P} max={90} unit="kg/ha"
-                          hint="Root development and grain fill." />
-                <Nutrient label="Potassium (K)" value={soil.K} max={60} unit="kg/ha"
-                          hint="Water regulation and stress tolerance." />
+                {NUTRIENTS.map(n => (
+                  <div className="nutrient-item" key={n.key} title={n.hint}>
+                    <div className="nutrient-head">
+                      <span className="nutrient-label">{n.label}</span>
+                      <span className="nutrient-value">{pct(soil[`${n.key}_low`])} <small>low</small> · {pct(soil[`${n.key}_high`])} <small>high</small></span>
+                    </div>
+                    <Bar value={100 * soil[`${n.key}_low`]} max={100} height={10} />
+                    <div className="nutrient-hint">{n.hint}</div>
+                  </div>
+                ))}
               </div>
-              <div className="ph-strip">
-                <div className="ph-strip-label">
-                  Soil pH <strong style={{ color: phTone }}>{fmt(soil.pH, 1)}</strong> — {phBand}
-                </div>
-                <div className="ph-scale">
-                  <div className="ph-optimal-band" />
-                  <div className="ph-marker" style={{ left: `${((soil.pH - 4) / 6) * 100}%` }} />
-                </div>
-                <div className="ph-ticks"><span>4.0</span><span>6.0–7.5 optimal</span><span>10.0</span></div>
-              </div>
+              <p className="section-lede" style={{ marginTop: '0.8rem' }}>
+                Share of tested samples deficient in a micronutrient:{' '}
+                {MICRO.map((x, i) => <span key={x.key}>{i ? ' · ' : ''}{x.label} <strong>{pct(soil[x.key])}</strong></span>)}.
+                Saline samples: <strong>{pct(soil.ec_saline)}</strong>.
+              </p>
             </>
-          ) : <Note tone="info">No soil profile recorded for {state}.</Note>}
+          ) : <Note tone="info">No Soil Health Card results for {state}.</Note>}
         </div>
 
         <div className="section-card fade-in">
-          <div className="section-title">🏅 Soil fertility across states</div>
-          <p className="section-lede">Ranked by total NPK. {state} is highlighted.</p>
-          <div style={{ width: '100%', height: Math.max(320, npkRanked.length * 19) }}>
+          <div className="section-title">
+            🏅 Across states
+            <div className="seg-control">
+              {NUTRIENTS.map(n => <button key={n.key} className={nutrient === n.key ? 'active' : ''} onClick={() => setNutrient(n.key)}>{n.key.toUpperCase()}</button>)}
+            </div>
+          </div>
+          <p className="section-lede">Share of samples rated low in {NUTRIENTS.find(n => n.key === nutrient).label.toLowerCase()}. {state} is highlighted.</p>
+          <div style={{ width: '100%', height: Math.max(320, ranked.length * 19) }}>
             <ResponsiveContainer>
-              <BarChart data={npkRanked} layout="vertical" margin={{ top: 4, right: 24, left: 8, bottom: 4 }}>
+              <BarChart data={ranked} layout="vertical" margin={{ top: 4, right: 24, left: 8, bottom: 4 }}>
                 <CartesianGrid {...gridProps} horizontal={false} />
-                <XAxis type="number" {...axisProps} />
+                <XAxis type="number" domain={[0, 1]} tickFormatter={v => `${Math.round(v * 100)}%`} {...axisProps} />
                 <YAxis type="category" dataKey="state" width={130} {...axisProps} interval={0} />
-                <Tooltip {...tooltipStyle} formatter={(v, n) => [`${v} kg/ha`, n]} />
-                <Legend wrapperStyle={{ fontSize: 11 }} />
-                <RBar dataKey="N" stackId="npk" fill={CHART_COLORS.green} name="N" />
-                <RBar dataKey="P" stackId="npk" fill={CHART_COLORS.blue} name="P" />
-                <RBar dataKey="K" stackId="npk" fill={CHART_COLORS.amber} name="K" radius={[0, 4, 4, 0]} />
+                <Tooltip {...tooltipStyle} formatter={v => [pct(v), 'low']} />
+                <RBar dataKey="value" radius={[0, 4, 4, 0]}>
+                  {ranked.map(r => <Cell key={r.state} fill={r.state === state ? CHART_COLORS.amber : CHART_COLORS.green} />)}
+                </RBar>
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -173,25 +174,22 @@ export default function SoilClimate({ options }) {
       </div>
 
       <div className="section-card fade-in">
-        <div className="section-title">💧 Rainfall against temperature</div>
+        <div className="section-title">💧 Kharif rainfall against maximum temperature</div>
         <p className="section-lede">
-          Every state-year in the dataset. Clusters correspond to India's climate zones — the
-          regional structure the model actually learns from.
+          Every state-year in the dataset. Clusters correspond to India's climate zones, the regional structure behind the yields.
         </p>
         <div style={{ width: '100%', height: 340 }}>
           <ResponsiveContainer>
             <ScatterChart margin={{ top: 10, right: 20, left: 0, bottom: 10 }}>
               <CartesianGrid {...gridProps} vertical />
-              <XAxis type="number" dataKey="temp" name="Temperature" {...axisProps}
-                     domain={['auto', 'auto']}
-                     label={{ value: 'Avg temperature (°C)', position: 'insideBottom', offset: -4, style: { fontSize: 11, fill: '#485c4e' } }} />
+              <XAxis type="number" dataKey="temp" name="Max temperature" {...axisProps} domain={['auto', 'auto']}
+                     label={{ value: 'Mean max temperature, Kharif window (°C)', position: 'insideBottom', offset: -4, style: { fontSize: 11, fill: '#485c4e' } }} />
               <YAxis type="number" dataKey="rain" name="Rainfall" {...axisProps}
                      label={{ value: 'Rainfall (mm)', angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: '#485c4e' } }} />
               <ZAxis range={[16, 16]} />
-              <Tooltip {...tooltipStyle} cursor={{ strokeDasharray: '3 3' }}
-                       formatter={(v, n) => [fmt(v, 1), n]} />
-              <Scatter name="Other states" data={scatterOf(data.weather, state, false)} fill="rgba(31,122,61,0.22)" />
-              <Scatter name={state} data={scatterOf(data.weather, state, true)} fill={CHART_COLORS.amber} />
+              <Tooltip {...tooltipStyle} cursor={{ strokeDasharray: '3 3' }} formatter={(v, n) => [fmt(v, 1), n]} />
+              <Scatter name="Other states" data={scatter(false)} fill="rgba(31,122,61,0.22)" />
+              <Scatter name={state} data={scatter(true)} fill={CHART_COLORS.amber} />
             </ScatterChart>
           </ResponsiveContainer>
         </div>
@@ -199,45 +197,3 @@ export default function SoilClimate({ options }) {
     </Page>
   )
 }
-
-const METRIC_LABELS = {
-  total_rainfall_mm: 'Rainfall',
-  avg_temp_c: 'Temperature',
-  avg_humidity_percent: 'Humidity',
-}
-const METRIC_UNITS = {
-  total_rainfall_mm: 'mm',
-  avg_temp_c: '°C',
-  avg_humidity_percent: '%',
-}
-const METRIC_COLORS = {
-  total_rainfall_mm: CHART_COLORS.blue,
-  avg_temp_c: CHART_COLORS.red,
-  avg_humidity_percent: CHART_COLORS.teal,
-}
-
-function scatterOf(weather, state, isSelected) {
-  const out = []
-  Object.entries(weather || {}).forEach(([st, w]) => {
-    if ((st === state) !== isSelected) return
-    ;(w.years || []).forEach((y, i) => {
-      out.push({ temp: w.temp[i], rain: w.rainfall[i], state: st, year: y })
-    })
-  })
-  return out
-}
-
-function Nutrient({ label, value, max, unit, hint }) {
-  return (
-    <div className="nutrient-item" title={hint}>
-      <div className="nutrient-head">
-        <span className="nutrient-label">{label}</span>
-        <span className="nutrient-value">{value} <small>{unit}</small></span>
-      </div>
-      <Bar value={value} max={max} height={10} />
-      <div className="nutrient-hint">{hint}</div>
-    </div>
-  )
-}
-
-

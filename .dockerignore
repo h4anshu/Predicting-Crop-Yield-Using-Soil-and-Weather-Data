@@ -1,6 +1,5 @@
 # What a git-based `docker build` (the GitHub-triggered Cloud Build) must NOT copy into the image.
-# The API needs only: api.py, features.py, forecasting.py, district_forecast.py, model_metrics.json,
-# crop_yield_model_v3.pkl, master_dataset_*.csv, the three extra/*.csv it reports, and serving/.
+# The API needs only: api.py, forecasting.py, district_forecast.py and serving/ (models and small views of the dataset).
 # deploy/stage_build.py lists the same files for local checks.
 .git
 .github
@@ -16,10 +15,7 @@ figures
 data
 pipeline
 deploy
-extra/*
-!extra/baseline_comparison.csv
-!extra/ablation_study_results.csv
-!extra/stage3_model_comparison_results.csv
+extra
 *.ipynb
 *.docx
 *.docm
@@ -29,5 +25,9 @@ app.py
 run_app.bat
 test_*.py
 train_v3.py
+features.py
+model_metrics.json
+crop_yield_model_v3.pkl
+master_dataset_*.csv
 requirements-data.txt
 crop_yield_model_v2_extra_trees.pkl

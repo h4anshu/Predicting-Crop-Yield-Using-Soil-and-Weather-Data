@@ -104,6 +104,31 @@ year 2000–2024, with no gap at 2020–2021.
 - **Access and cost.** Non-commercial Earth Engine project; the monthly non-commercial limit is 540,000 EECU-seconds and extraction used a small fraction. The service-account key is kept outside the repository (never committed or printed). The daily quota was raised from 18,000 to 72,000 EECU-seconds, and the change took several minutes to take effect.
 - **Usage terms.** Earth Engine non-commercial terms apply, and MODIS data are public. Attribution to NASA LP DAAC is appropriate.
 
+## Added 2026-10-12: the master dataset (one table, state → district → everything else)
+
+`python pipeline/build_master_dataset.py` joins every source above onto the district panel and writes `data/processed/master_panel.parquet` (22 MB, gitignored like all of `data/processed/`; rebuild with the script). `data/master_columns.csv` (tracked) lists every column, its group and how often it is filled; `data/processed/master_reconciliation.json` holds the numbers below.
+
+- **Grain.** One row per (district, crop, season, year): 441,437 rows × 102 columns, 35 states/UTs, 752 districts, 1997–2024, 118 crop names, of which 100 have a usable district yield (17, such as Apple, Cucumber and Yam, appear in the source with area but no yield, and "Oilseeds total" is a state aggregate). 441,075 are district rows; 362 are `level == "state"` rows.
+- **How the two levels meet.** The original state-level dataset (`master_dataset_enhanced.csv`) is almost row for row the sum of the district data. Compared on the 18,921 state-crop-season-year keys present in both, 93.4% agree on yield within 2% and 97.0% within 10% (median district-sum ÷ state ratio 1.000). So it is not kept as a second dataset: its values ride on every district row as `state_*` columns (`state_area`, `state_production`, `state_yield`, `state_fertilizer`, `state_pesticide`, `state_temp_c`, `state_rainfall_mm`, `state_humidity_pct`, `state_soil_N/P/K/pH`). 70.3% of district rows have them.
+- **State-only rows.** Old rows the district data does not cover stay as `level == "state"` rows, with the state value in `area` / `production` / `yield` and `source == "STATE_LEGACY"`: Delhi (203 rows, no district data at all), Goa (78), Arunachal Pradesh, Andhra Pradesh and Chhattisgarh (19 each), Nagaland (10), and a handful in Tripura, Jammu and Kashmir, Uttarakhand and Gujarat; 29 of them are the crop "Oilseeds total" (a state aggregate, not a crop). Nothing in the old dataset is dropped. Filter on `level` to get only one grain; **summing `area` over both levels double counts.** **Treat the state-only rows with caution:** several Delhi values are not credible (potato 66 t/ha and maize 8 t/ha, against national yields of about 12 and 2), so the app's trend and state comparisons use district rows only.
+- **What the district data added.** Rajasthan and the Union Territories (Andaman and Nicobar, Chandigarh, Ladakh, Dadra and Nagar Haveli and Daman and Diu) have no old state-level values, about 22 times the records, and the years 2021–2024.
+- **Seasons.** The old Autumn and Winter map to Kharif (the panel's four seasons: Kharif, Rabi, Summer, Whole Year).
+- **What each column group fills** (median over district rows; NaN is never filled):
+
+  | Group | Columns | Filled | Why not 100% |
+  |---|---|---|---|
+  | identifiers, area/production/yield | 14 + 5 | 100% | `valid_yield` is False on 9,306 district rows (zero or missing yield) |
+  | soil (Soil Health Card) | 22 | 98.8% | a 2023–25 snapshot, the same for every year |
+  | weather, fixed season window `wx_*` | 10 | 97.8% | 94.9–99.6% by season; districts without a polygon (about 1%) |
+  | ICRISAT attributes | 7 | 82.1% | ICRISAT covers 311 districts on 1966 boundaries, matched to the nearest current one |
+  | state-level `state_*` | 12 | 73.7% | see above; the old dataset ends in 2020, so 2021–2024 district rows have none (2020 only 2%) |
+  | satellite NDVI/EVI | 20 | 55.6% | Kharif 72.8% and Rabi 76.6% only; Summer and Whole Year have no NDVI window; starts 2005 |
+  | weather, planting-to-harvest `cal_*` | 12 | 10.2% | only Rice (main and second), Wheat and Maize (Kharif) have a calendar window |
+
+- **Caveats that travel with the columns.** `state_soil_*` is one unsourced constant per state; `state_fertilizer` and `state_pesticide` are totals of unclear origin (the Kaggle file) and are not per-hectare; the old dataset carries the same Madhya Pradesh overcount as the district source (the district figures it was built from), so the Centre-total comparison in Known issues applies to both levels. Calendar and NDVI windows are fixed national ones. Weather, NDVI, soil and ICRISAT columns describe the district, so on a `level == "state"` row they are empty.
+- **Checks the build asserts.** No key column is null, no duplicate (district, crop, season, year), and the number of district rows after all joins equals the number before (a merge that multiplies rows fails the build).
+- **Not done.** The served models still train on their own district panel and the state-level model on the old CSV; neither reads `master_panel.parquet` yet, so no reported number in this card or the roadmap changes because of this table.
+
 ## Not done yet
 
 - **ICRISAT yields (`icrisat_apportioned_apy.txt`) are downloaded but not merged.** 311 districts on 1966 boundaries, 19 states, 1966–2017. Only its irrigation, land use and fertilizer files are used (as static attributes, see above). Using its yields for pre-1997 history needs a proper boundary crosswalk.
