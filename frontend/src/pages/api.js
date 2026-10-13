@@ -97,3 +97,24 @@ export function fmt(n, digits = 2) {
     maximumFractionDigits: digits,
   })
 }
+
+/**
+ * State, district, crop and season, and year selection for the outlook, shared by the Dashboard and the District Outlook page.
+ * `initial` pre-selects a series (a click on the District Map). Until the options arrive every list is empty.
+ */
+export function useSeriesPicker(initial, fallbackState = 'Punjab') {
+  const opts = useGet('/api/district/options')
+  const [sel, setSel] = useState(initial || {})
+  const options = opts.data?.states
+  const states = options ? Object.keys(options).sort() : []
+  const state = states.includes(sel.state) ? sel.state : (states.includes(fallbackState) ? fallbackState : states[0])
+  const districts = state ? Object.entries(options[state]).sort((a, b) => a[1].name.localeCompare(b[1].name)) : []
+  const district = districts.find(([c]) => c === sel.district)?.[0] ?? districts[0]?.[0]
+  const seriesList = district ? options[state][district].series : []
+  const seriesKey = s => `${s.crop}|${s.season}`
+  const series = seriesList.find(s => seriesKey(s) === sel.series) ?? seriesList[0]
+  const year = sel.year ?? 2025
+  const query = district && series
+    ? `district_code=${district}&crop=${encodeURIComponent(series.crop)}&season=${encodeURIComponent(series.season)}` : null
+  return { opts, sel, setSel, states, state, districts, district, seriesList, series, seriesKey, year, query }
+}

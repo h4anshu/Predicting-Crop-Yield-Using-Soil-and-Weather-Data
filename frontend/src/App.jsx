@@ -67,7 +67,7 @@ function App() {
         </div>
 
         {/* Pages */}
-        {activePage === 'dashboard' && <Dashboard stats={stats} onNavigate={handlePageChange} />}
+        {activePage === 'dashboard' && <Dashboard stats={stats} onNavigate={handlePageChange} onOpen={pick => { setDistrictPick(pick); setActivePage('district') }} />}
         {activePage === 'district' && <DistrictForecast key={districtPick ? JSON.stringify(districtPick) : 'free'} initial={districtPick} />}
         {activePage === 'map' && (
           <DistrictMap onOpen={pick => { setDistrictPick(pick); setActivePage('district') }} />

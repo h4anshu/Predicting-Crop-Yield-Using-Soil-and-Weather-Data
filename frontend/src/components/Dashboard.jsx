@@ -1,5 +1,5 @@
-import { Bar, KpiCard, Note, Page, PageHeader } from '../pages/shared'
-import { fmt } from '../pages/api'
+import { Bar, KpiCard, Loading, Note, OutlookKpis, Page, PageHeader, SeriesPicker } from '../pages/shared'
+import { fmt, useGet, useSeriesPicker } from '../pages/api'
 
 const n = v => (v == null ? '—' : Number(v).toLocaleString('en-IN'))
 
@@ -7,7 +7,7 @@ const n = v => (v == null ? '—' : Number(v).toLocaleString('en-IN'))
  * The overview: what the one dataset holds, and what it supports forecasting. Every figure comes from /api/stats, which
  * is derived from the master table, so this page cannot show a number the other pages disagree with.
  */
-export default function Dashboard({ stats, onNavigate }) {
+export default function Dashboard({ stats, onNavigate, onOpen }) {
   const d = stats?.dataset
   const o = stats?.outlook
   if (!d) return null
@@ -19,6 +19,8 @@ export default function Dashboard({ stats, onNavigate }) {
         title="Dashboard"
         subtitle="One dataset from state to district, and an honest account of what it can forecast"
       />
+
+      <QuickOutlook onOpen={onOpen} />
 
       <div className="kpi-row fade-in">
         <KpiCard icon="🗃️" iconBg="var(--green-100)" label="RECORDS" value={n(d.rows)}
@@ -97,5 +99,41 @@ export default function Dashboard({ stats, onNavigate }) {
 
       <Note tone="info" title="Sources">{d.sources}.</Note>
     </Page>
+  )
+}
+
+/**
+ * Pick a district and a crop, get the expected yield with its range. The same outlook as the District Outlook page, one
+ * screen away from the numbers about the data, with the full evidence a click further.
+ */
+function QuickOutlook({ onOpen }) {
+  const picker = useSeriesPicker(null)
+  const { opts, query: q, year, state, district, series, seriesKey } = picker
+  const fc = useGet(q ? `/api/district/forecast?${q}&year=${year}` : null)
+  const f = fc.data
+  return (
+    <div className="section-card fade-in">
+      <div className="section-title">🎯 Get an outlook</div>
+      <p className="section-lede">
+        Choose a district and a crop to see what to expect next season: the mean of the last three published seasons, with the range it has held to.
+      </p>
+      {opts.loading && <Loading label="Loading districts…" />}
+      {opts.error && <Note tone="warn" title="Districts unavailable">{opts.error}</Note>}
+      {opts.data && <SeriesPicker p={picker} />}
+      {fc.loading && <Loading label="Working out the outlook…" />}
+      {fc.error && <Note tone="warn" title="No outlook for this selection">{fc.error}</Note>}
+      {f && (
+        <>
+          <div style={{ marginTop: '1rem' }}><OutlookKpis f={f} /></div>
+          <div style={{ display: 'flex', gap: '0.6rem', flexWrap: 'wrap', alignItems: 'center' }}>
+            <button className="btn-predict" style={{ width: 'auto', padding: '0.6rem 1.2rem' }}
+                    onClick={() => onOpen({ state, district: String(district), series: seriesKey(series), year })}>
+              Full outlook, evidence and track record →
+            </button>
+            <span className="section-lede" style={{ margin: 0 }}>No weather or soil inputs: they did not improve the expected yield (see Model &amp; Evidence).</span>
+          </div>
+        </>
+      )}
+    </div>
   )
 }

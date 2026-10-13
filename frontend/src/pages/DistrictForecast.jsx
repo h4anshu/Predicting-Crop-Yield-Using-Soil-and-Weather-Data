@@ -1,7 +1,6 @@
-import { useState } from 'react'
 import { ComposedChart, Line, ErrorBar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
-import { ErrorState, KpiCard, Loading, Note, Page, PageHeader } from './shared'
-import { CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt, useGet } from './api'
+import { ErrorState, Loading, Note, OutlookKpis, Page, PageHeader, SeriesPicker } from './shared'
+import { CHART_COLORS, axisProps, gridProps, tooltipStyle, fmt, useGet, useSeriesPicker } from './api'
 
 const signed = v => (v == null ? '—' : `${v > 0 ? '+' : ''}${fmt(v, 1)}%`)
 const lowerHigher = v => `${fmt(Math.abs(v), 1)}% ${v >= 0 ? 'lower' : 'higher'}`
@@ -14,21 +13,8 @@ const lowerHigher = v => `${fmt(Math.abs(v), 1)}% ${v >= 0 ? 'lower' : 'higher'}
  * range held, instead of presenting a number as more than it is.
  */
 export default function DistrictForecast({ initial }) {
-  const opts = useGet('/api/district/options')
-  const [sel, setSel] = useState(initial || {})   // `initial` comes from a click on the District Map
-
-  const options = opts.data?.states
-  const states = options ? Object.keys(options).sort() : []
-  const state = states.includes(sel.state) ? sel.state : states[0]
-  const districts = state ? Object.entries(options[state]).sort((a, b) => a[1].name.localeCompare(b[1].name)) : []
-  const district = districts.find(([c]) => c === sel.district)?.[0] ?? districts[0]?.[0]
-  const seriesList = district ? options[state][district].series : []
-  const seriesKey = s => `${s.crop}|${s.season}`
-  const series = seriesList.find(s => seriesKey(s) === sel.series) ?? seriesList[0]
-  const year = sel.year ?? 2025
-
-  const q = district && series
-    ? `district_code=${district}&crop=${encodeURIComponent(series.crop)}&season=${encodeURIComponent(series.season)}` : null
+  const picker = useSeriesPicker(initial)   // `initial` comes from a click on the District Map
+  const { opts, query: q, year } = picker
   const fc = useGet(q ? `/api/district/forecast?${q}&year=${year}` : null)
   const tr = useGet(q ? `/api/district/track-record?${q}` : null)
 
@@ -51,35 +37,7 @@ export default function DistrictForecast({ initial }) {
 
       <div className="section-card fade-in">
         <div className="section-title">🎛️ Choose a series</div>
-        <div className="input-row cols-3">
-          <div className="form-field">
-            <label>State</label>
-            <select value={state} onChange={e => setSel({ state: e.target.value })}>
-              {states.map(s => <option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
-          <div className="form-field">
-            <label>District</label>
-            <select value={district} onChange={e => setSel({ ...sel, state, district: e.target.value, series: undefined })}>
-              {districts.map(([c, d]) => <option key={c} value={c}>{d.name}</option>)}
-            </select>
-          </div>
-          <div className="form-field">
-            <label>Crop · season</label>
-            <select value={series ? seriesKey(series) : ''} onChange={e => setSel({ ...sel, state, district, series: e.target.value })}>
-              {seriesList.map(s => <option key={seriesKey(s)} value={seriesKey(s)}>{s.crop} · {s.season}</option>)}
-            </select>
-          </div>
-        </div>
-        <div className="input-row cols-3" style={{ marginTop: '0.6rem' }}>
-          <div className="form-field">
-            <label>Agricultural year starting</label>
-            <select value={year} onChange={e => setSel({ ...sel, state, district, series: series && seriesKey(series), year: Number(e.target.value) })}>
-              <option value={2025}>2025 (first unpublished season)</option>
-              <option value={2026}>2026 (two seasons past the data)</option>
-            </select>
-          </div>
-        </div>
+        <SeriesPicker p={picker} />
       </div>
 
       {fc.loading && <Loading label="Working out the outlook…" />}
@@ -91,19 +49,7 @@ export default function DistrictForecast({ initial }) {
 
       {f && (
         <>
-          <div className="kpi-row fade-in">
-            <KpiCard icon="🎯" iconBg="var(--green-100)" label={`EXPECTED YIELD ${f.forecast_year}`} value={fmt(f.forecast)}
-                     sub={`${f.unit} · 80% range ${fmt(f.interval.low)}–${fmt(f.interval.high)}`}
-                     title="The mean of the last three published seasons. The range comes from how far that mean has been from the recorded yield in past seasons, separately for volatile and stable series." />
-            <KpiCard icon="📅" iconBg="var(--blue-bg)" label={`LAST PUBLISHED (${f.baselines.last_published.year})`}
-                     value={fmt(f.baselines.last_published.value)}
-                     sub={`expected is ${f.forecast >= f.baselines.last_published.value ? '+' : ''}${fmt(100 * (f.forecast / f.baselines.last_published.value - 1), 0)}% against it`} />
-            <KpiCard icon="↔️" iconBg="var(--amber-bg)" label="RANGE WIDTH" value={`±${fmt(100 * f.interval.relative_half_width, 0)}%`}
-                     sub="of the expected yield, 80% of the time" />
-            <KpiCard icon={f.trust.low_trust ? '⚠️' : '✅'} iconBg={f.trust.low_trust ? 'var(--amber-bg)' : 'var(--green-100)'}
-                     label="RELIABILITY" value={f.trust.low_trust ? 'Volatile' : 'Stable'}
-                     sub={`${f.trust.seasons_of_history_used} of 3 recent seasons on record`} />
-          </div>
+          <OutlookKpis f={f} />
 
           <div className="section-card fade-in">
             <div className="section-title">⚖️ How much to trust this</div>
